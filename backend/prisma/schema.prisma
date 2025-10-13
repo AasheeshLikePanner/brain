@@ -1,0 +1,89 @@
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["postgresqlExtensions"]
+}
+
+datasource db {
+  provider   = "postgresql"
+  url        = env("DATABASE_URL")
+  extensions = [vector]
+}
+
+model User {
+  id         String    @id @default(uuid())
+  email      String?   @unique
+  createdAt  DateTime  @default(now())
+  memories   Memory[]
+  entities   Entity[]
+  summaries  Summary[]
+
+  @@map("users")
+}
+
+model Memory {
+  id                String      @id @default(uuid())
+  userId            String
+  type              String?     // 'note','voice_transcript','entity','task','event','number', etc.
+  content           String
+  source            String?     // 'mobile','web','email','twitter','import'
+  createdAt         DateTime    @default(now())
+  recordedAt        DateTime?   // When the event actually happened
+  parentContextId   String?     // Link to a higher-level context memory
+  metadata          Json?       // { language, confidence, detected_entities }
+  deleted           Boolean     @default(false)
+  user              User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  embeddings        Embedding[]
+  entityLinks       EntityLink[]
+
+  @@map("memories")
+}
+
+model Embedding {
+  id        String   @id @default(uuid())
+  memoryId  String
+  modelName String?
+  embedding Unsupported("vector")
+  createdAt DateTime @default(now())
+  memory    Memory   @relation(fields: [memoryId], references: [id], onDelete: Cascade)
+
+  @@map("embeddings")
+}
+
+model Entity {
+  id            String       @id @default(uuid())
+  userId        String
+  name          String
+  type          String?      // person, org, date, location, product, number, etc.
+  canonicalForm String?
+  createdAt     DateTime     @default(now())
+  user          User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  links         EntityLink[]
+
+  @@map("entities")
+}
+
+model EntityLink {
+  id         String    @id @default(uuid())
+  entityId   String
+  memoryId   String
+  role       String?   // subject, object, date_of, amount, birthday_of, etc.
+  confidence Float?
+  entity     Entity    @relation(fields: [entityId], references: [id], onDelete: Cascade)
+  memory     Memory    @relation(fields: [memoryId], references: [id], onDelete: Cascade)
+
+  @@map("entity_links")
+}
+
+model Summary {
+  id              String    @id @default(uuid())
+  userId          String
+  title           String?
+  content         String
+  sourceMemoryIds String[]
+  level           Int       // 0: atomic, 1: day, 2: week
+  modelName       String?
+  createdAt       DateTime  @default(now())
+  user            User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("summaries")
+}
