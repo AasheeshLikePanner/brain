@@ -1,6 +1,7 @@
 import prisma from '../db';
 import { llmService } from './llm.service';
 import { memoryService } from './memory.service';
+import { graphService } from './graph.service'; // NEW
 import { Chat, ChatMessage } from '@prisma/client';
 
 class ChatService {
@@ -55,8 +56,38 @@ class ChatService {
     const history = await this.getChatHistory(chatId, userId);
     console.log(`[ChatService] Retrieved ${history.length} messages from chat history.`);
     
-    const memoryContext = await memoryService.getContext(userId, message, 3); // Get top 3 memories
-    console.log(`[ChatService] Retrieved memory context:\n---\n${memoryContext}\n---`);
+    const { contextString, sources } = await memoryService.getContext(userId, message, 3); // Get top 3 memories
+    console.log(`[ChatService] Retrieved memory context:\n---\n${contextString}\n---`);
+
+    // NEW: Graph Query Integration
+    let graphContext = "";
+    const graphQueryKeywords = ['who is', 'what is the relationship between', 'connections of', 'tell me about the connections of'];
+    const isGraphQuery = graphQueryKeywords.some(keyword => message.toLowerCase().includes(keyword));
+
+    if (isGraphQuery) {
+      console.log('[ChatService] Detected potential graph query.');
+      // Basic entity extraction for demonstration. A more robust solution would use an LLM.
+      const entityNameMatch = message.match(/(who is|what is the relationship between|connections of|tell me about the connections of)\s+(.*?)(?:\?|$)/i);
+      if (entityNameMatch && entityNameMatch[2]) {
+        const entityName = entityNameMatch[2].trim();
+        console.log(`[ChatService] Attempting to find relationships for entity: ${entityName}`);
+        const relationships = await graphService.getRelationships(userId, entityName);
+        
+        if (relationships.length > 0) {
+          graphContext = `
+Knowledge Graph Relationships for "${entityName}":\n` +
+            relationships.map(link => {
+              const subject = link.subjectEntity?.name || 'Unknown';
+              const object = link.objectEntity?.name || 'Unknown';
+              const source = link.memory?.content || link.chatMessage?.content || 'Unknown Source';
+              return `- ${subject} ${link.role} ${object} (Source: ${source.substring(0, 50)}...)`;
+            }).join('\n') + '\n';
+          console.log('[ChatService] Injected graph context.');
+        } else {
+          console.log('[ChatService] No direct graph relationships found for this entity.');
+        }
+      }
+    }
 
     // 3. Construct the prompt
     const historyText = history.map(m => `${m.role}: ${m.content}`).join('\n');
@@ -65,6 +96,7 @@ class ChatService {
     const systemPrompt = `You are a helpful assistant. Your answers must be formatted in MDX.
 When you mention a date, wrap it in a <DateHighlight>component</DateHighlight>. Example: <DateHighlight>2025-10-15</DateHighlight>.
 When you reference a specific memory from the context provided, wrap the key insight in a <MemoryHighlight>component</MemoryHighlight>. Example: <MemoryHighlight>the user prefers coffee in the morning</MemoryHighlight>.
+When you use a memory from the "Relevant Memories" context to construct your answer, you MUST cite it at the end of the sentence by using a <Source /> component with the corresponding ID. Example: The user enjoys coffee in the morning.<Source id="memory-uuid-123" />
 Keep your answers concise and clear.
 
 Here is the current context for the user:
@@ -73,7 +105,7 @@ Here is the current context for the user:
 
 Use this context to provide more relevant and personalized answers.`;
 
-    const userPrompt = `Based on the following memories and the recent chat history, answer the user's question.\n\nRelevant Memories:\n${memoryContext}\n\nChat History:\n${historyText}\n\nUser's Question: ${message}`;
+    const userPrompt = `Based on the following memories and the recent chat history, answer the user's question.\n\n${graphContext}Relevant Memories:\n${contextString}\n\nChat History:\n${historyText}\n\nUser's Question: ${message}`;
 
     const prompt = `${systemPrompt}\n\n${userPrompt}`;
     console.log(`[ChatService] Constructed prompt for LLM.`);

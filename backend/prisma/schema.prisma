@@ -40,6 +40,8 @@ model ChatMessage {
   role      String   // "user" or "assistant"
   content   String
   createdAt DateTime @default(now())
+  isTripletExtracted Boolean @default(false)
+  entityLinks EntityLink[]
 
   @@map("chat_messages")
 }
@@ -55,6 +57,8 @@ model Memory {
   parentContextId   String?     // Link to a higher-level context memory
   metadata          Json?       // { language, confidence, detected_entities }
   deleted           Boolean     @default(false)
+  isSummarized      Boolean     @default(false)
+  isTripletExtracted Boolean     @default(false)
   user              User        @relation(fields: [userId], references: [id], onDelete: Cascade)
   embeddings        Embedding[]
   entityLinks       EntityLink[]
@@ -81,19 +85,26 @@ model Entity {
   canonicalForm String?
   createdAt     DateTime     @default(now())
   user          User         @relation(fields: [userId], references: [id], onDelete: Cascade)
-  links         EntityLink[]
+  subjectLinks  EntityLink[] @relation("SubjectLinks")
+  objectLinks   EntityLink[] @relation("ObjectLinks")
 
+  @@unique([userId, name])
   @@map("entities")
 }
 
 model EntityLink {
   id         String    @id @default(uuid())
-  entityId   String
-  memoryId   String
-  role       String?   // subject, object, date_of, amount, birthday_of, etc.
+  entityId   String    // Subject
+  objectId   String?   // Object (optional, if linking to another entity)
+  memoryId   String?   // Memory (optional, if linking to a memory)
+  chatMessageId String? // NEW
+  role       String?   // Predicate
   confidence Float?
-  entity     Entity    @relation(fields: [entityId], references: [id], onDelete: Cascade)
-  memory     Memory    @relation(fields: [memoryId], references: [id], onDelete: Cascade)
+  
+  subjectEntity Entity @relation("SubjectLinks", fields: [entityId], references: [id], onDelete: Cascade)
+  objectEntity  Entity? @relation("ObjectLinks", fields: [objectId], references: [id], onDelete: Cascade)
+  memory        Memory? @relation(fields: [memoryId], references: [id], onDelete: Cascade)
+  chatMessage   ChatMessage? @relation(fields: [chatMessageId], references: [id], onDelete: Cascade) // NEW
 
   @@map("entity_links")
 }

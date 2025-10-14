@@ -6,10 +6,14 @@ import { serialize } from 'next-mdx-remote/serialize';
 import { DateHighlight } from './DateHighlight';
 import { MemoryHighlight } from './MemoryHighlight';
 
+// NEW: An empty component to swallow the Source tags
+const Source = ({ id }: { id: string }) => null;
+
 // Define the custom components that the MDX can use
 const components = {
   DateHighlight,
   MemoryHighlight,
+  Source, // Add the new component here
   p: (props: any) => <p {...props} className="mb-4" />,
   h1: (props: any) => <h1 {...props} className="text-3xl font-bold mb-4" />,
   h2: (props: any) => <h2 {...props} className="text-2xl font-bold mb-3" />,
