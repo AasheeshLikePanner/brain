@@ -1,34 +1,44 @@
 import prisma from '../db';
 import { llmService } from './llm.service';
 import { v4 as uuidv4 } from 'uuid';
+import { pipeline, env } from '@xenova/transformers';
+
+// Set the cache directory for transformers.js
+env.cacheDir = './.transformers-cache';
 
 class MemoryService {
+  private reranker: any; // To store the loaded reranker pipeline
 
-  /**
-   * Ingests a new piece of content, creates a memory, generates its embedding,
-   * and stores both in the database.
-   * @param userId The ID of the user who owns the memory.
-   * @param content The text content to ingest.
-   */
+  constructor() {
+    this.initReranker();
+  }
+
+  private async initReranker() {
+    try {
+      // Load the reranker model only once
+      this.reranker = await pipeline('text-classification', 'BAAI/bge-reranker-base', { quantized: false });
+      console.log('BGE Reranker model loaded successfully.');
+    } catch (error) {
+      console.error('Failed to load BGE Reranker model:', error);
+    }
+  }
+
   async ingest(userId: string, content: string) {
     try {
-      // Step 1: Create and store the memory record
       const newMemory = await prisma.memory.create({
         data: {
           userId,
           content,
-          type: 'note', // Defaulting to 'note' for now
+          type: 'note',
         },
       });
 
-      // Step 2: Generate an embedding for the content
       const embeddingVector = await llmService.createEmbedding(content);
 
       if (!embeddingVector) {
         throw new Error('Failed to generate embedding for the memory.');
       }
 
-      // Step 3: Store the embedding using a raw SQL query
       const embeddingId = uuidv4();
       const vectorString = `[${embeddingVector.join(',')}]`;
       await prisma.$executeRaw`
@@ -45,28 +55,67 @@ class MemoryService {
     }
   }
 
+  async getContext(userId: string, query: string, limit: number = 5): Promise<string> {
+    console.log(`[MemoryService] Getting context for query: "${query}"`);
+    // 1. Create an embedding for the user's query
+    const queryEmbedding = await llmService.createEmbedding(query);
+    const vectorString = `[${queryEmbedding.join(',')}]`;
+
+    // 2. Find the most relevant memories using vector similarity search
+    const rawRelevantMemories: { id: string; content: string; similarity: number; rerankScore?: number }[] = await prisma.$queryRaw`
+      SELECT m.id, m.content, (1 - (e.embedding <=> ${vectorString}::vector)) AS similarity
+      FROM memories m
+      JOIN embeddings e ON m.id = e."memoryId"
+      WHERE m."userId" = ${userId}
+      ORDER BY e.embedding <=> ${vectorString}::vector
+      LIMIT 10
+    `;
+    console.log(`[MemoryService] Found ${rawRelevantMemories.length} raw relevant memories.`);
+
+    if (rawRelevantMemories.length === 0) {
+      return "No relevant memories found.";
+    }
+
+    // 3. Add a Similarity Threshold Filter
+    const SIMILARITY_THRESHOLD = 0.78;
+    let filteredMemories = rawRelevantMemories.filter(r => r.similarity >= SIMILARITY_THRESHOLD);
+    console.log(`[MemoryService] ${filteredMemories.length} memories passed the similarity threshold.`);
+
+    if (filteredMemories.length === 0) {
+      console.warn('[MemoryService] No memories met the similarity threshold. Falling back to top 2.');
+      filteredMemories = rawRelevantMemories.slice(0, 2);
+    }
+
+    // 4. Reranking
+    let finalResults = filteredMemories;
+    if (this.reranker) {
+      const reranked = await Promise.all(filteredMemories.map(async (mem) => {
+        const res = await this.reranker([query, mem.content]);
+        const score = Array.isArray(res) ? res[0].score : res.score;
+        return { ...mem, rerankScore: score };
+      }));
+      finalResults = reranked.sort((a, b) => (b.rerankScore || 0) - (a.rerankScore || 0));
+      console.log('[MemoryService] Reranked memories:', finalResults.map(r => ({ content: r.content.substring(0, 50) + '...', rerankScore: r.rerankScore })));
+    } else {
+      console.warn('[MemoryService] Reranker not initialized. Skipping reranking step.');
+    }
+
+    // 5. Take top `limit` after filtering and reranking
+    const topMemories = finalResults.slice(0, limit);
+
+    // 6. Combine raw content of top memories for context
+    const context = topMemories.map(mem => mem.content).join('\n---\n');
+    return context;
+  }
+
   async retrieve(userId: string, query: string): Promise<string> {
     try {
-      // 1. Create an embedding for the user's query
-      const queryEmbedding = await llmService.createEmbedding(query);
-      const vectorString = `[${queryEmbedding.join(',')}]`;
+      const context = await this.getContext(userId, query);
 
-      // 2. Find the most relevant memories using vector similarity search
-      const relevantMemories: { content: string }[] = await prisma.$queryRaw`
-        SELECT m.content
-        FROM memories m
-        JOIN embeddings e ON m.id = e."memoryId"
-        WHERE m."userId" = ${userId}
-        ORDER BY e.embedding <-> ${vectorString}::vector
-        LIMIT 5
-      `;
-
-      if (relevantMemories.length === 0) {
+      if (context === "No relevant memories found.") {
         return "I don't have any memories related to that.";
       }
 
-      // 3. Construct the prompt for the LLM
-      const context = relevantMemories.map(m => m.content).join('\n---\n');
       const prompt = `Based on the following memories, please answer the user's question.
 
 Memories:
@@ -74,7 +123,6 @@ ${context}
 
 User's Question: ${query}`;
 
-      // 4. Generate the final response
       const finalResponse = await llmService.generateCompletion(prompt);
 
       return finalResponse;

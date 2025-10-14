@@ -1,9 +1,11 @@
 "use client";
 
 import { useState, useEffect } from "react";
+import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Mic, ArrowUpIcon, MicOff } from "lucide-react";
 import TextareaAutosize from "react-textarea-autosize";
+import { createChat } from "@/lib/api";
 
 // Helper to format time from seconds to MM:SS
 const formatTime = (totalSeconds: number) => {
@@ -15,9 +17,10 @@ const formatTime = (totalSeconds: number) => {
 };
 
 export default function Home() {
-  const [value, setValue] = useState("");
+  const [message, setMessage] = useState("");
   const [isRecording, setIsRecording] = useState(false);
   const [seconds, setSeconds] = useState(0);
+  const router = useRouter();
 
   useEffect(() => {
     let interval: NodeJS.Timeout;
@@ -32,10 +35,27 @@ export default function Home() {
     };
   }, [isRecording]);
 
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!message.trim()) return;
+
+    try {
+      // 1. Create the new chat session and get its ID
+      const newChat = await createChat(message);
+
+      // 2. Redirect to the new chat's page
+      router.push(`/chat/${newChat.id}`);
+    } catch (error) {
+      console.error("Error creating chat:", error);
+      // You could show an error message to the user here
+    }
+  };
+
   return (
     <div className="flex flex-col h-screen bg-background text-foreground justify-center">
       <div className="px-4 pb-10 flex flex-col items-center">
-        <div
+        <form
+          onSubmit={handleSubmit}
           className={`w-full max-w-2xl rounded-2xl border-2 border-border bg-muted relative overflow-hidden transition-[min-height] duration-500 ease-in-out ${
             isRecording ? "min-h-[220px]" : "min-h-[120px]"
           }`}
@@ -51,7 +71,7 @@ export default function Home() {
               {/* Timer, always rendered, opacity controlled */}
               <div
                 className={`absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 flex items-center justify-center w-full gap-2 transition-opacity duration-300 ${
-                  isRecording ? "opacity-100" : "opacity-0"
+                  isRecording ? "opacity-100" : "opacity-0 pointer-events-none"
                 }`}
               >
                 <span className="relative flex h-2 w-2">
@@ -64,14 +84,10 @@ export default function Home() {
               </div>
 
               {/* Textarea, always rendered, opacity controlled */}
-              <div
-                className={`transition-opacity duration-300 ${
-                  !isRecording ? "opacity-100" : "opacity-0"
-                }`}
-              >
+              <div>
                 <TextareaAutosize
-                  value={value}
-                  onChange={(e) => setValue(e.target.value)}
+                  value={message}
+                  onChange={(e) => setMessage(e.target.value)}
                   placeholder="Ask anything..."
                   className="w-full resize-none bg-transparent focus:outline-none text-base"
                   minRows={1}
@@ -110,7 +126,7 @@ export default function Home() {
               </div>
             </div>
           </div>
-        </div>
+        </form>
       </div>
     </div>
   );

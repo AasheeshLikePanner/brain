@@ -38,7 +38,7 @@ class LLMService {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          model: 'llama3.1:8b',
+          model: 'qwen2.5:1.5b',
           prompt,
           stream: false, // We want the full response at once
         }),
@@ -52,6 +52,37 @@ class LLMService {
       return data.response;
     } catch (error) {
       console.error('Error generating completion:', error);
+      throw error;
+    }
+  }
+
+  async generateCompletionStream(prompt: string): Promise<ReadableStream<Uint8Array>> {
+    console.log('[LLMService] Generating completion stream from Ollama.');
+    console.log(`[LLMService] Prompt: \n---\n${prompt}\n---`);
+    try {
+      const response = await fetch(`${this.ollamaUrl}/api/generate`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          model: 'qwen2.5:1.5b',
+          prompt,
+          stream: true,
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error(`Ollama API request failed with status ${response.status}`);
+      }
+
+      if (!response.body) {
+        throw new Error('Response body is null');
+      }
+
+      return response.body;
+    } catch (error) {
+      console.error('Error generating completion stream:', error);
       throw error;
     }
   }
