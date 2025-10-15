@@ -12,10 +12,15 @@ class GraphService {
     return prisma.entityLink.findMany({
       where: {
         OR: [
-          { entityId: entityId }, // Where this entity is the subject
-          { objectId: entityId }, // Where this entity is the object
+          {
+            entityId: entityId, // Where this entity is the subject
+            subjectEntity: { userId: userId },
+          },
+          {
+            objectId: entityId, // Where this entity is the object
+            objectEntity: { userId: userId },
+          },
         ],
-        subjectEntity: { userId: userId }, // Ensure the subject entity belongs to the user
       },
       include: {
         subjectEntity: true,

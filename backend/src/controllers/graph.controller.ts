@@ -5,7 +5,7 @@ class GraphController {
   // Hardcoded user for now. In a real app, this would come from auth middleware.
   private placeholderUserId = '123e4567-e89b-12d3-a456-426614174000';
 
-  async getEntities(req: Request, res: Response) {
+  getEntities = async (req: Request, res: Response) => {
     const { type } = req.query;
     try {
       const entities = await graphService.getEntitiesByType(this.placeholderUserId, type as string);
@@ -16,7 +16,7 @@ class GraphController {
     }
   }
 
-  async getRelationships(req: Request, res: Response) {
+  getRelationships = async (req: Request, res: Response) => {
     const { entityName } = req.params;
     const { relationshipType } = req.query;
 

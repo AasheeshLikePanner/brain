@@ -70,30 +70,39 @@ class ChatService {
       const entityNameMatch = message.match(/(who is|what is the relationship between|connections of|tell me about the connections of)\s+(.*?)(?:\?|$)/i);
       if (entityNameMatch && entityNameMatch[2]) {
         const entityName = entityNameMatch[2].trim();
-        console.log(`[ChatService] Attempting to find relationships for entity: ${entityName}`);
-        const relationships = await graphService.getRelationships(userId, entityName);
-        
-        if (relationships.length > 0) {
-          graphContext = `
+        // NEW: Find the entity by name to get its ID
+        const entity = await prisma.entity.findFirst({
+          where: { userId: userId, name: entityName },
+        });
+
+        if (entity) {
+          console.log(`[ChatService] Found entity ID for ${entityName}: ${entity.id}`);
+          const relationships = await graphService.getRelationships(userId, entity.id); // Pass entity.id
+          
+          if (relationships.length > 0) {
+            graphContext = `
 Knowledge Graph Relationships for "${entityName}":\n` +
-            relationships.map(link => {
-              const subject = link.subjectEntity?.name || 'Unknown';
-              const object = link.objectEntity?.name || 'Unknown';
-              const source = link.memory?.content || link.chatMessage?.content || 'Unknown Source';
-              return `- ${subject} ${link.role} ${object} (Source: ${source.substring(0, 50)}...)`;
-            }).join('\n') + '\n';
-          console.log('[ChatService] Injected graph context.');
+              relationships.map(link => {
+                const subject = link.subjectEntity?.name || 'Unknown';
+                const object = link.objectEntity?.name || 'Unknown';
+                const source = link.memory?.content || link.chatMessage?.content || 'Unknown Source';
+                return `- ${subject} ${link.role} ${object} (Source: ${source.substring(0, 50)}...)`;
+              }).join('\n') + '\n';
+            console.log('[ChatService] Injected graph context.');
+          } else {
+            console.log('[ChatService] No direct graph relationships found for this entity.');
+          }
         } else {
-          console.log('[ChatService] No direct graph relationships found for this entity.');
+          console.log(`[ChatService] Entity "${entityName}" not found in graph.`);
         }
-      }
     }
 
     // 3. Construct the prompt
     const historyText = history.map(m => `${m.role}: ${m.content}`).join('\n');
     const currentDate = new Date().toUTCString();
 
-    const systemPrompt = `You are a helpful assistant. Your answers must be formatted in MDX.
+    const systemPrompt = `You are a helpful assistant whose primary goal is to answer questions based *only* on the provided context. If the answer is not in the context, state that you don't know.
+Your answers must be formatted in MDX.
 When you mention a date, wrap it in a <DateHighlight>component</DateHighlight>. Example: <DateHighlight>2025-10-15</DateHighlight>.
 When you reference a specific memory from the context provided, wrap the key insight in a <MemoryHighlight>component</MemoryHighlight>. Example: <MemoryHighlight>the user prefers coffee in the morning</MemoryHighlight>.
 When you use a memory from the "Relevant Memories" context to construct your answer, you MUST cite it at the end of the sentence by using a <Source /> component with the corresponding ID. Example: The user enjoys coffee in the morning.<Source id="memory-uuid-123" />
@@ -105,7 +114,15 @@ Here is the current context for the user:
 
 Use this context to provide more relevant and personalized answers.`;
 
-    const userPrompt = `Based on the following memories and the recent chat history, answer the user's question.\n\n${graphContext}Relevant Memories:\n${contextString}\n\nChat History:\n${historyText}\n\nUser's Question: ${message}`;
+    const userPrompt = `Here is the relevant context you should use to answer the question:
+${graphContext}
+Relevant Memories:
+${contextString}
+
+Chat History:
+${historyText}
+
+User's Question: ${message}`;
 
     const prompt = `${systemPrompt}\n\n${userPrompt}`;
     console.log(`[ChatService] Constructed prompt for LLM.`);
@@ -148,4 +165,4 @@ Use this context to provide more relevant and personalized answers.`;
   }
 }
 
-export const chatService = new ChatService();
+export const chatService = new ChatService(); // Temporary comment to force recompile

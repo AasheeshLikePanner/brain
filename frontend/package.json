@@ -17,6 +17,7 @@
     "next-mdx-remote": "^5.0.0",
     "react": "19.1.0",
     "react-dom": "19.1.0",
+    "react-force-graph-2d": "^1.29.0",
     "react-textarea-autosize": "^8.5.9",
     "tailwind-merge": "^3.3.1"
   },
