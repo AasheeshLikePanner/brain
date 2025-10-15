@@ -70,7 +70,7 @@ model Embedding {
   id        String   @id @default(uuid())
   memoryId  String
   modelName String?
-  embedding Unsupported("vector")
+  embedding Unsupported("vector(768)")
   createdAt DateTime @default(now())
   memory    Memory   @relation(fields: [memoryId], references: [id], onDelete: Cascade)
 

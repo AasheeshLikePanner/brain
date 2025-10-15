@@ -2,7 +2,9 @@ import prisma from '../db';
 import { llmService } from './llm.service';
 import { memoryService } from './memory.service';
 import { graphService } from './graph.service'; // NEW
+import { memoryIndexService } from './memory-index.service';
 import { Chat, ChatMessage } from '@prisma/client';
+import { memoryQueue } from '../queues/memory.queue';
 
 class ChatService {
 
@@ -43,21 +45,28 @@ class ChatService {
   async streamChatResponse(chatId: string, userId: string, message: string): Promise<ReadableStream<Uint8Array>> {
     console.log('[ChatService] Starting streamChatResponse.');
     // 1. Save user message
-    await prisma.chatMessage.create({
-      data: {
-        chatId,
-        role: 'user',
-        content: message,
-      },
-    });
-    console.log('[ChatService] Saved user message.');
+    console.log('[ChatService] Attempting to save user message...');
+    try {
+      await prisma.chatMessage.create({
+        data: {
+          chatId,
+          role: 'user',
+          content: message,
+        },
+      });
+      console.log('[ChatService] Saved user message. Proceeding to get chat history and memories.');
+    } catch (error) {
+      console.error('[ChatService] Error saving user message:', error);
+      throw error; // Re-throw to propagate the error
+    }
 
-    // 2. Get chat history and relevant memories
+    // 2. Get chat history and relevant memories using the new MemoryIndexService
+    console.log('[ChatService] Getting chat history...');
     const history = await this.getChatHistory(chatId, userId);
-    console.log(`[ChatService] Retrieved ${history.length} messages from chat history.`);
+    console.log(`[ChatService] Retrieved ${history.length} messages from chat history. Getting memory context using MemoryIndexService...`);
     
-    const { contextString, sources } = await memoryService.getContext(userId, message, 3); // Get top 3 memories
-    console.log(`[ChatService] Retrieved memory context:\n---\n${contextString}\n---`);
+    const { contextString, sources } = await memoryIndexService.searchMemories(userId, message, 3); // Get top 3 memories
+    console.log(`[ChatService] Retrieved memory context:\n---\n${contextString}\n---. Checking for graph query...`);
 
     // NEW: Graph Query Integration
     let graphContext = "";
@@ -65,23 +74,23 @@ class ChatService {
     const isGraphQuery = graphQueryKeywords.some(keyword => message.toLowerCase().includes(keyword));
 
     if (isGraphQuery) {
-      console.log('[ChatService] Detected potential graph query.');
+      console.log('[ChatService] Detected potential graph query. Attempting entity extraction...');
       // Basic entity extraction for demonstration. A more robust solution would use an LLM.
       const entityNameMatch = message.match(/(who is|what is the relationship between|connections of|tell me about the connections of)\s+(.*?)(?:\?|$)/i);
       if (entityNameMatch && entityNameMatch[2]) {
         const entityName = entityNameMatch[2].trim();
+        console.log(`[ChatService] Extracted entity name: ${entityName}. Finding entity in Prisma...`);
         // NEW: Find the entity by name to get its ID
         const entity = await prisma.entity.findFirst({
           where: { userId: userId, name: entityName },
         });
 
         if (entity) {
-          console.log(`[ChatService] Found entity ID for ${entityName}: ${entity.id}`);
+          console.log(`[ChatService] Found entity ID for ${entityName}: ${entity.id}. Getting relationships...`);
           const relationships = await graphService.getRelationships(userId, entity.id); // Pass entity.id
           
           if (relationships.length > 0) {
-            graphContext = `
-Knowledge Graph Relationships for "${entityName}":\n` +
+            graphContext = `\nKnowledge Graph Relationships for "${entityName}":\n` +
               relationships.map(link => {
                 const subject = link.subjectEntity?.name || 'Unknown';
                 const object = link.objectEntity?.name || 'Unknown';
@@ -97,6 +106,7 @@ Knowledge Graph Relationships for "${entityName}":\n` +
         }
     }
     }
+    console.log('[ChatService] Constructing prompt for LLM...');
 
     // 3. Construct the prompt
     const historyText = history.map(m => `${m.role}: ${m.content}`).join('\n');
@@ -115,22 +125,14 @@ Here is the current context for the user:
 
 Use this context to provide more relevant and personalized answers.`;
 
-    const userPrompt = `Here is the relevant context you should use to answer the question:
-${graphContext}
-Relevant Memories:
-${contextString}
-
-Chat History:
-${historyText}
-
-User's Question: ${message}`;
+    const userPrompt = `Here is the relevant context you should use to answer the question:\n${graphContext}Relevant Memories:\n${contextString}\n\nChat History:\n${historyText}\n\nUser's Question: ${message}`;
 
     const prompt = `${systemPrompt}\n\n${userPrompt}`;
-    console.log(`[ChatService] Constructed prompt for LLM.`);
+    console.log(`[ChatService] Constructed prompt for LLM. Requesting stream from LLM service...`);
 
     // 4. Get the stream from the LLM service
     const llmStream = await llmService.generateCompletionStream(prompt);
-    console.log('[ChatService] Received stream from LLM service.');
+    console.log('[ChatService] Received stream from LLM service. Piping to transform stream...');
 
     // 5. Use a TransformStream to save the full response while streaming
     let fullResponse = '';
@@ -151,6 +153,7 @@ User's Question: ${message}`;
       },
       async flush(controller) {
         // When the stream is done, save the assistant's message
+        console.log('[ChatService] Stream finished. Saving assistant message...');
         await prisma.chatMessage.create({
           data: {
             chatId,
@@ -159,6 +162,10 @@ User's Question: ${message}`;
           },
         });
         console.log(`[ChatService] Saved assistant response for chat ${chatId}.\n---\n${fullResponse}\n---`);
+
+        // Add a job to the memory extraction queue
+        await memoryQueue.add('extract', { userId, chatId, userMessage: message, assistantMessage: fullResponse });
+        console.log(`[ChatService] Added memory extraction job for chat ${chatId}.`);
       }
     });
 

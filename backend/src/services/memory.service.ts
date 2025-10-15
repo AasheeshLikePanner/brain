@@ -26,6 +26,7 @@ class MemoryService {
 
   async ingest(userId: string, content: string) {
     try {
+      console.log('[MemoryService] Ingesting new memory...');
       const newMemory = await prisma.memory.create({
         data: {
           userId,
@@ -36,8 +37,10 @@ class MemoryService {
           }
         },
       });
+      console.log(`[MemoryService] Memory ${newMemory.id} created. Generating embedding...`);
 
       const embeddingVector = await llmService.createEmbedding(content);
+      console.log('[MemoryService] Embedding generated.');
 
       if (!embeddingVector) {
         throw new Error('Failed to generate embedding for the memory.');
@@ -45,10 +48,12 @@ class MemoryService {
 
       const embeddingId = uuidv4();
       const vectorString = `[${embeddingVector.join(',')}]`;
+      console.log('[MemoryService] Inserting embedding into database...');
       await prisma.$executeRaw`
         INSERT INTO "embeddings" ("id", "memoryId", "modelName", "embedding")
         VALUES (${embeddingId}::uuid, ${newMemory.id}::uuid, 'nomic-embed-text', ${vectorString}::vector)
       `;
+      console.log('[MemoryService] Embedding inserted.');
 
       console.log(`Successfully ingested and embedded memory ${newMemory.id}`);
       return newMemory;
