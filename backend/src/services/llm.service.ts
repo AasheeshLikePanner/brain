@@ -7,13 +7,27 @@ class LLMService {
 
   async createEmbedding(text: string): Promise<number[]> {
     try {
-      console.log(`[LLMService] Simulating embedding creation for text: "${text.substring(0, 50)}..."`);
-      await new Promise(resolve => setTimeout(resolve, 100)); // Simulate network delay
-      const dummyEmbedding = Array(768).fill(0.123); // Return a dummy embedding
-      console.log('[LLMService] Successfully simulated embedding creation.');
-      return dummyEmbedding;
+      console.log(`[LLMService] Creating embedding for text: "${text.substring(0, 50)}..."`);
+      const response = await fetch(`${this.ollamaUrl}/api/embeddings`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          model: 'nomic-embed-text',
+          prompt: text,
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error(`Ollama API request failed with status ${response.status}`);
+      }
+
+      const data = await response.json();
+      console.log('[LLMService] Successfully created embedding.');
+      return data.embedding;
     } catch (error) {
-      console.error('Error simulating embedding creation:', error);
+      console.error('Error creating embedding:', error);
       throw error;
     }
   }

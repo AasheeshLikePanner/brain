@@ -117,6 +117,7 @@ Your answers must be formatted in MDX.
 When you mention a date, wrap it in a <DateHighlight>component</DateHighlight>. Example: <DateHighlight>2025-10-15</DateHighlight>.
 When you reference a specific memory from the context provided, wrap the key insight in a <MemoryHighlight>component</MemoryHighlight>. Example: <MemoryHighlight>the user prefers coffee in the morning</MemoryHighlight>.
 When you use a memory from the "Relevant Memories" context to construct your answer, you MUST cite it at the end of the sentence by using a <Source /> component with the corresponding ID. Example: The user enjoys coffee in the morning.<Source id="memory-uuid-123" />
+If relevant memories are provided, integrate them into your response as if you remember them from our past conversations.
 Keep your answers concise and clear.
 
 Here is the current context for the user:
@@ -125,10 +126,11 @@ Here is the current context for the user:
 
 Use this context to provide more relevant and personalized answers.`;
 
-    const userPrompt = `Here is the relevant context you should use to answer the question:\n${graphContext}Relevant Memories:\n${contextString}\n\nChat History:\n${historyText}\n\nUser's Question: ${message}`;
+    const userPrompt = `Here is the relevant context, including memories from our past conversations, that you should use to answer the question:\n${graphContext}Relevant Memories:\n${contextString}\n\nChat History:\n${historyText}\n\nUser's Question: ${message}`;
 
     const prompt = `${systemPrompt}\n\n${userPrompt}`;
-    console.log(`[ChatService] Constructed prompt for LLM. Requesting stream from LLM service...`);
+    console.log(`[ChatService] Constructed prompt for LLM. Full Prompt:\n---\n${prompt}\n---`);
+    console.log(`[ChatService] Requesting stream from LLM service...`);
 
     // 4. Get the stream from the LLM service
     const llmStream = await llmService.generateCompletionStream(prompt);
@@ -165,7 +167,7 @@ Use this context to provide more relevant and personalized answers.`;
 
         // Add a job to the memory extraction queue
         await memoryQueue.add('extract', { userId, chatId, userMessage: message, assistantMessage: fullResponse });
-        console.log(`[ChatService] Added memory extraction job for chat ${chatId}.`);
+        console.log(`[ChatService] Added memory extraction job for chat ${chatId} to queue.`);
       }
     });
 

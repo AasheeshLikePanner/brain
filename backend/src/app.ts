@@ -9,6 +9,7 @@ import { extractTriplets } from './jobs/triplet_extraction.job';
 import graphRoutes from './api/routes/graph.routes';
 import { memoryWorker } from './queues/memory.queue';
 import { memoryIndexService } from './services/memory-index.service';
+import { memoryDeduplicationService } from './services/memory-deduplication.service';
 
 const app = express();
 const port = process.env.PORT || 8080;
@@ -36,33 +37,45 @@ app.use('/api/graph', graphRoutes);
 app.listen(port, async () => {
   console.log(`Server is listening on port ${port}`);
 
-  // Initialize memory index (placeholder for now, actual indexing is via migrations)
-  // await memoryIndexService.buildIndex('system'); // Temporarily commented out for debugging startup issues
+  // Only initialize worker if not running in a separate worker process
+  if (process.env.RUN_WORKER !== 'true') {
+    // Initialize memory index (placeholder for now, actual indexing is via migrations)
+    await memoryIndexService.buildIndex('system');
 
-  // Schedule the archiving job to run at 2:00 AM every day
-  cron.schedule('0 2 * * *', () => {
-    console.log('\n---\nRunning scheduled job: archiveOldMemories\n---');
-    archiveOldMemories();
-  }, {
-    timezone: "America/New_York" // Example timezone, should be configured based on user preference
-  });
-  console.log('Scheduled daily memory archiving job.');
+    // Schedule the archiving job to run at 2:00 AM every day
+    cron.schedule('0 2 * * *', () => {
+      console.log('\n---\nRunning scheduled job: archiveOldMemories\n---');
+      archiveOldMemories();
+    }, {
+      timezone: "America/New_York" // Example timezone, should be configured based on user preference
+    });
+    console.log('Scheduled daily memory archiving job.');
 
-  // Schedule the summarization job to run at 3:00 AM every day
-  cron.schedule('0 3 * * *', () => {
-    console.log('\n---\nRunning scheduled job: generateDailySummaries\n---');
-    generateDailySummaries();
-  }, {
-    timezone: "America/New_York" // Example timezone, should be configured based on user preference
-  });
-  console.log('Scheduled daily summarization job.');
+    // Schedule the summarization job to run at 3:00 AM every day
+    cron.schedule('0 3 * * *', () => {
+      console.log('\n---\nRunning scheduled job: generateDailySummaries\n---');
+      generateDailySummaries();
+    }, {
+      timezone: "America/New_York" // Example timezone, should be configured based on user preference
+    });
+    console.log('Scheduled daily summarization job.');
 
-  // Schedule the triplet extraction job to run every hour
-  cron.schedule('0 * * * *', () => {
-    console.log('\n---\nRunning scheduled job: extractTriplets\n---');
-    extractTriplets();
-  }, {
-    timezone: "America/New_York" // Example timezone
-  });
-  console.log('Scheduled hourly triplet extraction job.');
+    // Schedule the deduplication job to run at 2:30 AM every day
+    cron.schedule('30 2 * * *', async () => {
+      console.log('\n---\nRunning scheduled job: findAndMergeDuplicates\n---');
+      await memoryDeduplicationService.findAndMergeDuplicates();
+    }, {
+      timezone: "America/New_York" // Example timezone
+    });
+    console.log('Scheduled daily memory deduplication job.');
+
+    // Schedule the triplet extraction job to run every hour
+    cron.schedule('0 * * * *', () => {
+      console.log('\n---\nRunning scheduled job: extractTriplets\n---');
+      extractTriplets();
+    }, {
+      timezone: "America/New_York" // Example timezone
+    });
+    console.log('Scheduled hourly triplet extraction job.');
+  }
 });

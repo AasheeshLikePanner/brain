@@ -1,5 +1,6 @@
 import { Queue, Worker, Job } from 'bullmq';
 import redis from './redis';
+import { memoryExtractorService } from 'services/memory-extractor.service';
 
 // Define the interface for the job data
 export interface MemoryExtractionJob {
@@ -23,10 +24,8 @@ export const memoryWorker = new Worker<MemoryExtractionJob>(
   'memory-extraction',
   async (job: Job<MemoryExtractionJob>) => {
     console.log(`[MemoryWorker] Processing job ${job.id}:`, job.data);
-    // Simulate a delay for placeholder
-    await new Promise(resolve => setTimeout(resolve, 5000));
-    console.log(`[MemoryWorker] Finished processing job ${job.id}.`);
-    // In a later phase, this will call the MemoryExtractorService
+    await memoryExtractorService.extractAndStore(job.data.userId, job.data.userMessage, job.data.assistantMessage, job.data.chatId);
+    console.log(`[MemoryWorker] Finished processing job ${job.id}.` );
   },
   { connection: redis }
 );
@@ -40,3 +39,5 @@ memoryWorker.on('failed', (job, err) => {
 });
 
 console.log('[MemoryQueue] Memory extraction queue and worker initialized.');
+console.log('[MemoryWorker] Worker instance created and event listeners attached.');
+console.log('[MemoryWorker] Worker instance created and event listeners attached.');
