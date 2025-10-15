@@ -96,6 +96,7 @@ Knowledge Graph Relationships for "${entityName}":\n` +
           console.log(`[ChatService] Entity "${entityName}" not found in graph.`);
         }
     }
+    }
 
     // 3. Construct the prompt
     const historyText = history.map(m => `${m.role}: ${m.content}`).join('\n');
@@ -165,4 +166,4 @@ User's Question: ${message}`;
   }
 }
 
-export const chatService = new ChatService(); // Temporary comment to force recompile
+export const chatService = new ChatService();

@@ -53,7 +53,7 @@ app.listen(port, () => {
   console.log('Scheduled daily summarization job.');
 
   // Schedule the triplet extraction job to run every hour
-  cron.schedule('0 * * * *', () => {
+  cron.schedule('* * * * *', () => {
     console.log('\n---\nRunning scheduled job: extractTriplets\n---');
     extractTriplets();
   }, {

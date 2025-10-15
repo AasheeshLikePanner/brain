@@ -17,7 +17,7 @@ class MemoryService {
   private async initReranker() {
     try {
       // Load the reranker model only once
-      this.reranker = await pipeline('text-classification', 'BAAI/bge-reranker-base', { quantized: false });
+      this.reranker = await pipeline('text-classification', 'Xenova/bge-reranker-base', { quantized: true });
       console.log('BGE Reranker model loaded successfully.');
     } catch (error) {
       console.error('Failed to load BGE Reranker model:', error);

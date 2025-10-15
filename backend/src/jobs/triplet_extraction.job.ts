@@ -19,7 +19,7 @@ export const extractTriplets = async () => {
       SELECT DISTINCT "userId" FROM (
         SELECT "userId" FROM "memories" WHERE "isTripletExtracted" = false AND "deleted" = false
         UNION ALL
-        SELECT "userId" FROM "chat_messages" WHERE "isTripletExtracted" = false
+        SELECT c."userId" FROM "chat_messages" cm JOIN "chats" c ON cm."chatId" = c.id WHERE cm."isTripletExtracted" = false
       ) AS unprocessed_content;
     `;
 
@@ -70,11 +70,28 @@ Triplets (JSON array):`;
 
         if (llmResponse) {
           try {
-            const triplets: Triplet[] = JSON.parse(llmResponse);
-            if (Array.isArray(triplets) && triplets.every(t => t.subject && t.predicate && t.object && t.sourceId && t.sourceType)) {
-              console.log(`[TripletExtractionJob] Extracted ${triplets.length} triplets for content item ${contentItem.id}.`);
+            const jsonMatch = llmResponse.match(/```json\s*([\s\S]*?)\s*```/);
+            let cleanedResponse = llmResponse;
+            if (jsonMatch && jsonMatch[1]) {
+              cleanedResponse = jsonMatch[1];
+            } else {
+              // Fallback if no markdown block, try to find a JSON array directly
+              const directJsonMatch = llmResponse.match(/\s*\[[\s\S]*\]\s*/);
+              if (directJsonMatch && directJsonMatch[0]) {
+                cleanedResponse = directJsonMatch[0];
+              }
+            }
+            const triplets: Triplet[] = JSON.parse(cleanedResponse);
+            if (Array.isArray(triplets) && triplets.every(t => t.subject)) {
+              // Inject sourceId and sourceType into each triplet
+              const processedTriplets = triplets.map(t => ({
+                ...t,
+                sourceId: contentItem.id,
+                sourceType: contentItem.type,
+              }));
+              console.log(`[TripletExtractionJob] Extracted ${processedTriplets.length} triplets for content item ${contentItem.id}.`);
 
-              for (const triplet of triplets) {
+              for (const triplet of processedTriplets) {
                 // Ensure entities exist or create them
                 const [subjectEntity, objectEntity] = await Promise.all([
                   prisma.entity.upsert({
