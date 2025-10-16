@@ -1,4 +1,5 @@
 import 'dotenv/config';
+console.log('--- NODEMON APP.TS CHANGE TEST ---');
 import express, { Request, Response } from 'express';
 import chatRoutes from './api/routes/chat.routes';
 import memoriesRoutes from './api/routes/memories.routes';

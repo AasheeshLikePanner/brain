@@ -57,13 +57,13 @@ class MemoryDeduplicationService {
       return mem1.content === mem2.content;
     }
 
-    interface RawEmbeddingResult { embedding: number[]; }
+    interface RawEmbeddingResult { embedding: string; }
 
     const embedding1Result: RawEmbeddingResult[] = await prisma.$queryRaw`
-      SELECT embedding FROM embeddings WHERE "memoryId" = ${mem1.id} LIMIT 1
+      SELECT embedding::text as embedding FROM embeddings WHERE "memoryId" = ${mem1.id} LIMIT 1
     `;
     const embedding2Result: RawEmbeddingResult[] = await prisma.$queryRaw`
-      SELECT embedding FROM embeddings WHERE "memoryId" = ${mem2.id} LIMIT 1
+      SELECT embedding::text as embedding FROM embeddings WHERE "memoryId" = ${mem2.id} LIMIT 1
     `;
 
     if (embedding1Result.length === 0 || embedding2Result.length === 0) {
@@ -71,8 +71,8 @@ class MemoryDeduplicationService {
       return mem1.content === mem2.content;
     }
 
-    const vector1 = embedding1Result[0].embedding;
-    const vector2 = embedding2Result[0].embedding;
+    const vector1 = JSON.parse(embedding1Result[0].embedding);
+    const vector2 = JSON.parse(embedding2Result[0].embedding);
 
     // Calculate cosine similarity
 

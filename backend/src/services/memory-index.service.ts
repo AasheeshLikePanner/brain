@@ -271,7 +271,7 @@ class MemoryIndexService {
       SET 
         "accessCount" = "accessCount" + 1,
         "lastAccessedAt" = NOW()
-      WHERE id = ANY(${memoryIds}::uuid[])
+      WHERE id = ANY(CAST(${memoryIds} AS text[]))
     `;
     } catch (error) {
       console.error('Error tracking memory access:', error);

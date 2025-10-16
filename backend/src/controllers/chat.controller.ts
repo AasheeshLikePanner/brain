@@ -139,7 +139,9 @@ class ChatController {
   // --- Legacy Methods ---
   handleIngest = async (req: Request, res: Response) => {
     console.log('[ChatController] Received request to handleIngest.');
-    const { content, temporal } = req.body; // Extract temporal
+    console.log('[ChatController] Raw req.body:', req.body);
+    const { content, temporal, type, importance, source } = req.body; // Extract temporal, type, importance, source
+    console.log(`[ChatController] handleIngest: Extracted - content: ${content}, type: ${type}, importance: ${importance}, source: ${source}, temporal: ${temporal}`);
 
     if (!content) {
       return res.status(400).json({ error: 'Content is required' });
@@ -151,7 +153,14 @@ class ChatController {
       console.log('[ChatController] ensureUser completed. Proceeding with memory ingestion...');
 
       const recordedAtValue = (temporal !== undefined && temporal !== null) ? temporal : null;
-      const newMemory = await memoryService.ingest(userId, content, 'note', 0.5, 'unknown', recordedAtValue as string | null); // Pass temporal to recordedAt
+      const newMemory = await memoryService.ingest(
+        userId,
+        content,
+        type || 'note', // Use provided type or default to 'note'
+        importance || 0.5, // Use provided importance or default to 0.5
+        source || 'unknown', // Use provided source or default to 'unknown'
+        recordedAtValue as string | null
+      );
       res.status(201).json({ message: 'Memory ingested successfully', memory: newMemory });
     } catch (error) {
       console.error('Error ingesting memory:', error);
