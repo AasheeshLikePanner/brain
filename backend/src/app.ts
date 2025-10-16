@@ -1,3 +1,4 @@
+import 'dotenv/config';
 import express, { Request, Response } from 'express';
 import chatRoutes from './api/routes/chat.routes';
 import memoriesRoutes from './api/routes/memories.routes';
@@ -10,8 +11,14 @@ import graphRoutes from './api/routes/graph.routes';
 import { memoryWorker } from './queues/memory.queue';
 import { memoryIndexService } from './services/memory-index.service';
 import { memoryDeduplicationService } from './services/memory-deduplication.service';
+import { applyConfidenceDecay } from './jobs/confidence-decay.job';
+import { MemoryAssociationService } from './services/memory-association.service';
+import { ProactiveService } from './services/proactive.service';
+import prisma from './db';
+
 
 const app = express();
+const proactiveService = new ProactiveService();
 const port = process.env.PORT || 8080;
 
 // Middleware to parse JSON bodies
@@ -24,6 +31,19 @@ app.use(cors());
 app.get('/', (req: Request, res: Response) => {
   res.send('Second Brain Backend is running!');
 });
+
+app.get('/test', (req, res) => {
+  console.log('[App] /test route hit!');
+  res.send('Test route works!');
+});
+
+// app.get('/api/chat/proactive', async (req, res) => {
+//   console.log('[App] /api/chat/proactive route hit directly in app.ts!');
+//   const userId = '123e4567-e89b-12d3-a456-426614174000'; // Hardcode for testing
+//   const alerts = await proactiveService.generateProactiveAlerts(userId);
+//   console.log('[App] Generated proactive alerts directly in app.ts:', alerts);
+//   res.json(alerts);
+// });
 
 // Use the chat routes
 app.use('/api/chat', chatRoutes);
@@ -70,12 +90,53 @@ app.listen(port, async () => {
     console.log('Scheduled daily memory deduplication job.');
 
     // Schedule the triplet extraction job to run every hour
-    cron.schedule('0 * * * *', () => {
+    cron.schedule('* * * * *', () => {
       console.log('\n---\nRunning scheduled job: extractTriplets\n---');
       extractTriplets();
     }, {
       timezone: "America/New_York" // Example timezone
     });
     console.log('Scheduled hourly triplet extraction job.');
+
+    // Schedule the confidence decay job to run at 2:15 AM every day
+    cron.schedule('15 2 * * *', () => {
+      console.log('\n---\nRunning scheduled job: applyConfidenceDecay\n---');
+      applyConfidenceDecay();
+    }, {
+      timezone: "America/New_York" // Example timezone
+    });
+    console.log('Scheduled daily confidence decay job.');
+
+    // Schedule the memory association computation job to run at 3 AM every Sunday
+    const associationService = new MemoryAssociationService();
+    cron.schedule('0 3 * * 0', async () => {
+      console.log('\n---\nRunning scheduled job: computeMemoryAssociations\n---');
+      const users = await prisma.user.findMany();
+      for (const user of users) {
+        await associationService.computeMemoryAssociations(user.id);
+      }
+    }, {
+      timezone: "America/New_York" // Example timezone
+    });
+    console.log('Scheduled weekly memory association computation job.');
+
+    // Schedule the proactive alert generation job to run every hour
+    const proactiveService = new ProactiveService();
+    const alertCache = new Map<string, any>();
+    cron.schedule('0 * * * *', async () => {
+      console.log('\n---\nRunning scheduled job: pre-computing proactive alerts\n---');
+      const users = await prisma.user.findMany();
+      for (const user of users) {
+        const alerts = await proactiveService.generateProactiveAlerts(user.id);
+        if (alerts.length > 0) {
+          alertCache.set(user.id, {
+            alerts,
+            timestamp: new Date()
+          });
+          console.log(`[Proactive] Found ${alerts.length} alerts for user ${user.id}`);
+        }
+      }
+    });
+    console.log('Scheduled hourly proactive alert generation job.');
   }
 });

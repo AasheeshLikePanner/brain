@@ -2,6 +2,8 @@ import { v4 as uuidv4 } from 'uuid';
 import prisma from '../db';
 import { llmService } from './llm.service';
 import { MemoryType } from '../models/memory';
+import { ContradictionDetectionService } from './contradiction-detection.service';
+import { memoryService } from './memory.service';
 
 interface ExtractedMemory {
   type: MemoryType;
@@ -14,6 +16,12 @@ interface ExtractedMemory {
 }
 
 class MemoryExtractorService {
+  private contradictionService: ContradictionDetectionService;
+
+  constructor() {
+    this.contradictionService = new ContradictionDetectionService();
+  }
+
   async extractAndStore(userId: string, userMessage: string, assistantMessage: string, chatId: string): Promise<void> {
     console.log('[MemoryExtractorService] Extracting and storing memories...');
     const combinedContent = `User: ${userMessage}\nAssistant: ${assistantMessage}`;
@@ -29,40 +37,60 @@ class MemoryExtractorService {
     const extractedMemories: ExtractedMemory[] = await this.parseMemories(combinedContent);
 
     // 3. Store Memories and Embeddings
-    for (const mem of extractedMemories) {
-      const newMemory = await prisma.memory.create({
-        data: {
-          id: uuidv4(),
-          userId,
-          type: mem.type,
-          content: mem.content,
-          metadata: {
-            importance: mem.importance,
-            source: mem.source,
-            chatId: mem.chatId,
-            temporal: mem.temporal ? mem.temporal.toISOString() : undefined,
-            entities: mem.entities,
-          },
-          isTripletExtracted: false, // Will be processed by triplet extraction job
-          isSummarized: false, // Will be processed by summarization job
-        },
-      });
+    for (const memoryData of extractedMemories) {
+      // Create the memory first
+      const memory = await memoryService.ingest(
+        userId,
+        memoryData.content,
+        memoryData.type,
+        memoryData.importance,
+        memoryData.source,
+        memoryData.temporal?.toISOString()
+      );
 
-      const embeddingVector = await llmService.createEmbedding(mem.content);
-      if (!embeddingVector) {
-        console.error(`[MemoryExtractorService] Failed to generate embedding for memory ${newMemory.id}`);
-        continue; // Skip embedding if generation fails
+      // Check for contradictions
+      const contradictionCheck = await this.contradictionService.detectContradictions(
+        userId,
+        memoryData.content,
+        memory.id
+      );
+
+      if (contradictionCheck.hasContradictions) {
+        console.log(`[Contradiction Detected] Memory ${memory.id} contradicts existing memories`);
+        
+        for (const contradiction of contradictionCheck.contradictions) {
+          // Determine if it's temporal progression or true contradiction
+          const isProgression = this.isTemporalProgression(
+            contradiction.existingContent,
+            memoryData.content
+          );
+
+          if (isProgression) {
+            await this.contradictionService.resolveContradiction(
+              memory.id,
+              contradiction.existingMemoryId,
+              'temporal_update'
+            );
+          } else {
+            await this.contradictionService.resolveContradiction(
+              memory.id,
+              contradiction.existingMemoryId,
+              'contradiction_noted'
+            );
+          }
+        }
       }
-
-      const embeddingId = uuidv4();
-      const vectorString = `[${embeddingVector.join(',')}]`;
-      await prisma.$executeRaw`
-        INSERT INTO "embeddings" ("id", "memoryId", "modelName", "embedding")
-        VALUES (${embeddingId}::uuid, ${newMemory.id}::uuid, 'nomic-embed-text', ${vectorString}::vector)
-      `;
-      console.log(`[MemoryExtractorService] Stored memory ${newMemory.id} of type ${mem.type} with embedding ${embeddingId}.`);
     }
     console.log(`[MemoryExtractorService] Finished extracting and storing ${extractedMemories.length} memories.`);
+  }
+
+  private isTemporalProgression(oldContent: string, newContent: string): boolean {
+    // Simple heuristic: check for role/status changes
+    const progressionKeywords = ['was', 'used to', 'previously', 'now', 'became', 'promoted'];
+    return progressionKeywords.some(keyword => 
+      newContent.toLowerCase().includes(keyword) ||
+      oldContent.toLowerCase().includes(keyword)
+    );
   }
 
   private async quickDuplicateCheck(userId: string, content: string): Promise<boolean> {

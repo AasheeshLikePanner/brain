@@ -1,7 +1,24 @@
 import { Request, Response } from 'express';
 import { memoryService } from '../services/memory.service';
+import prisma from '../db';
 
 class MemoriesController {
+  // Hardcoded user for now. In a real app, this would come from auth middleware.
+  private placeholderUserId = '123e4567-e89b-12d3-a456-426614174000';
+
+  getAllMemories = async (req: Request, res: Response) => {
+    try {
+      const memories = await prisma.memory.findMany({
+        where: { userId: this.placeholderUserId },
+        include: { embeddings: true } // Include embeddings to check if they are populated
+      });
+      res.status(200).json(memories);
+    } catch (error) {
+      console.error('Error getting all memories:', error);
+      res.status(500).json({ error: 'Failed to retrieve memories.' });
+    }
+  }
+
   async reinforceMemory(req: Request, res: Response) {
     const { memoryId } = req.params;
     if (!memoryId) {

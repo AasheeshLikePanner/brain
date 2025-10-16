@@ -1,3 +1,4 @@
+import 'dotenv/config';
 import { memoryWorker } from './queues/memory.queue';
 
 console.log('[Worker] Memory worker process started.');

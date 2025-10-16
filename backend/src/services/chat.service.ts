@@ -5,8 +5,14 @@ import { graphService } from './graph.service'; // NEW
 import { memoryIndexService } from './memory-index.service';
 import { Chat, ChatMessage } from '@prisma/client';
 import { memoryQueue } from '../queues/memory.queue';
+import { ReasoningService } from './reasoning.service';
 
 class ChatService {
+  private reasoningService: ReasoningService;
+
+  constructor() {
+    this.reasoningService = new ReasoningService();
+  }
 
   async createChat(userId: string, initialMessage: string): Promise<Chat> {
     const chat = await prisma.chat.create({
@@ -42,7 +48,13 @@ class ChatService {
     return chat?.messages || [];
   }
 
-  async streamChatResponse(chatId: string, userId: string, message: string): Promise<ReadableStream<Uint8Array>> {
+  async streamChatResponse(
+    chatId: string,
+    userId: string,
+    message: string
+  ): Promise<ReadableStream<Uint8Array>> {
+    
+    // ... existing code to save user message ...
     console.log('[ChatService] Starting streamChatResponse.');
     // 1. Save user message
     console.log('[ChatService] Attempting to save user message...');
@@ -60,79 +72,77 @@ class ChatService {
       throw error; // Re-throw to propagate the error
     }
 
-    // 2. Get chat history and relevant memories using the new MemoryIndexService
-    console.log('[ChatService] Getting chat history...');
+    // Get chat history
     const history = await this.getChatHistory(chatId, userId);
-    console.log(`[ChatService] Retrieved ${history.length} messages from chat history. Getting memory context using MemoryIndexService...`);
+
+    // EXTRACT ENTITIES from recent conversation for contextual boosting
+    const contextEntities = await this.extractContextEntities(history, message, userId);
+
+    // Search memories with smart scoring
+    const relevantMemories = await memoryIndexService.searchMemories(
+      userId,
+      message,
+      5,
+      contextEntities
+    );
+
+    // Get memory objects with full details
+    const memoryDetails = await prisma.memory.findMany({
+      where: {
+        id: { in: relevantMemories.map(m => m.id) }
+      }
+    });
+
+    // PERFORM REASONING on the retrieved memories
+    const implications = await this.reasoningService.detectImplications(
+      userId,
+      memoryDetails,
+      message
+    );
+
+    // Try graph-based reasoning if query seems relational
+    const graphReasoning = await this.reasoningService.graphReasoning(
+      userId,
+      message
+    );
+
+    // ... existing graph query detection ...
+    const contextString = relevantMemories
+      .map(mem => `[id: ${mem.id}] ${mem.content}`)
+      .join('\n---\n');
+
+    // ENHANCED PROMPT CONSTRUCTION with reasoning
+    let reasoningContext = '';
     
-    const { contextString, sources } = await memoryIndexService.searchMemories(userId, message, 3); // Get top 3 memories
-    console.log(`[ChatService] Retrieved memory context:\n---\n${contextString}\n---. Checking for graph query...`);
+    if (implications.length > 0) {
+      reasoningContext += '\n\n**Relevant Insights:**\n';
+      implications.forEach((imp, i) => {
+        reasoningContext += `${i + 1}. ${imp.content}\n`;
+      });
+    }
 
-    // NEW: Graph Query Integration
-    let graphContext = "";
-    const graphQueryKeywords = ['who is', 'what is the relationship between', 'connections of', 'tell me about the connections of'];
-    const isGraphQuery = graphQueryKeywords.some(keyword => message.toLowerCase().includes(keyword));
-
-    if (isGraphQuery) {
-      console.log('[ChatService] Detected potential graph query. Attempting entity extraction...');
-      // Basic entity extraction for demonstration. A more robust solution would use an LLM.
-      const entityNameMatch = message.match(/(who is|what is the relationship between|connections of|tell me about the connections of)\s+(.*?)(?:\?|$)/i);
-      if (entityNameMatch && entityNameMatch[2]) {
-        const entityName = entityNameMatch[2].trim();
-        console.log(`[ChatService] Extracted entity name: ${entityName}. Finding entity in Prisma...`);
-        // NEW: Find the entity by name to get its ID
-        const entity = await prisma.entity.findFirst({
-          where: { userId: userId, name: entityName },
+    if (graphReasoning.reasoning) {
+      reasoningContext += '\n\n**Graph Analysis:**\n';
+      reasoningContext += graphReasoning.reasoning + '\n';
+      
+      if (graphReasoning.relevantPaths.length > 0) {
+        reasoningContext += '\nRelevant connections:\n';
+        graphReasoning.relevantPaths.forEach(p => {
+          reasoningContext += `- ${p.explanation}\n`;
         });
-
-        if (entity) {
-          console.log(`[ChatService] Found entity ID for ${entityName}: ${entity.id}. Getting relationships...`);
-          const relationships = await graphService.getRelationships(userId, entity.id); // Pass entity.id
-          
-          if (relationships.length > 0) {
-            graphContext = `\nKnowledge Graph Relationships for "${entityName}":\n` +
-              relationships.map(link => {
-                const subject = link.subjectEntity?.name || 'Unknown';
-                const object = link.objectEntity?.name || 'Unknown';
-                const source = link.memory?.content || link.chatMessage?.content || 'Unknown Source';
-                return `- ${subject} ${link.role} ${object} (Source: ${source.substring(0, 50)}...)`;
-              }).join('\n') + '\n';
-            console.log('[ChatService] Injected graph context.');
-          } else {
-            console.log('[ChatService] No direct graph relationships found for this entity.');
-          }
-        } else {
-          console.log(`[ChatService] Entity "${entityName}" not found in graph.`);
-        }
+      }
     }
-    }
-    console.log('[ChatService] Constructing prompt for LLM...');
 
-    // 3. Construct the prompt
-    const historyText = history.map(m => `${m.role}: ${m.content}`).join('\n');
     const currentDate = new Date().toUTCString();
+    const historyText = history.map(m => `${m.role}: ${m.content}`).join('\n');
 
-    const systemPrompt = `You are a helpful assistant whose primary goal is to answer questions based *only* on the provided context. If the answer is not in the context, state that you don't know.
-Your answers must be formatted in MDX.
-When you mention a date, wrap it in a <DateHighlight>component</DateHighlight>. Example: <DateHighlight>2025-10-15</DateHighlight>.
-When you reference a specific memory from the context provided, wrap the key insight in a <MemoryHighlight>component</MemoryHighlight>. Example: <MemoryHighlight>the user prefers coffee in the morning</MemoryHighlight>.
-When you use a memory from the "Relevant Memories" context to construct your answer, you MUST cite it at the end of the sentence by using a <Source /> component with the corresponding ID. Example: The user enjoys coffee in the morning.<Source id="memory-uuid-123" />
-If relevant memories are provided, integrate them into your response as if you remember them from our past conversations.
-Keep your answers concise and clear.
+    const systemPrompt = `You are a helpful assistant with access to the user's personal knowledge base and reasoning capabilities.\n\nYou have analyzed the context and identified some insights:${reasoningContext}\n\nWhen responding:\n1. Use the provided insights to give more helpful, proactive answers\n2. If implications suggest actions, offer them naturally\n3. If there are connections the user might not have considered, mention them\n4. Always cite sources using <Source id=\"...\" />\n\nYour answers must be formatted in MDX.\nWhen you mention a date, wrap it in <DateHighlight>component</DateHighlight>.\nWhen you reference a memory, wrap key insights in <MemoryHighlight>component</MemoryHighlight>.\nWhen you use information from memories, cite with <Source id=\"memory-id\" />.\n\nCurrent context:\n- Current Date/Time: ${currentDate}\n- User Location: [Location not provided]`;
 
-Here is the current context for the user:
-- Current Date/Time: ${currentDate}
-- User Location: [Location not provided]
-
-Use this context to provide more relevant and personalized answers.`;
-
-    const userPrompt = `Here is the relevant context, including memories from our past conversations, that you should use to answer the question:\n${graphContext}Relevant Memories:\n${contextString}\n\nChat History:\n${historyText}\n\nUser's Question: ${message}`;
+    const userPrompt = `Here is the relevant context, including memories from our past conversations, that you should use to answer the question:\nRelevant Memories:\n${contextString}\n\nChat History:\n${historyText}\n\nUser's Question: ${message}`;
 
     const prompt = `${systemPrompt}\n\n${userPrompt}`;
-    console.log(`[ChatService] Constructed prompt for LLM. Full Prompt:\n---\n${prompt}\n---`);
-    console.log(`[ChatService] Requesting stream from LLM service...`);
 
-    // 4. Get the stream from the LLM service
+    // ... rest of existing streaming logic ...
     const llmStream = await llmService.generateCompletionStream(prompt);
     console.log('[ChatService] Received stream from LLM service. Piping to transform stream...');
 
@@ -172,6 +182,46 @@ Use this context to provide more relevant and personalized answers.`;
     });
 
     return llmStream.pipeThrough(transformStream);
+  }
+
+  /**
+ * Extract key entities from recent conversation for contextual boosting
+ */
+  private async extractContextEntities(
+    history: ChatMessage[],
+    currentMessage: string,
+    userId: string
+  ): Promise<string[]> {
+    // Get last 5 messages for context
+    const recentMessages = history.slice(-5);
+    const conversationText = recentMessages
+      .map(m => m.content)
+      .join(' ') + ' ' + currentMessage;
+
+    // Simple entity extraction (you can enhance this)
+    const entities: string[] = [];
+
+    // Extract capitalized words (potential named entities)
+    const capitalizedWords = conversationText.match(/\b[A-Z][a-z]+\b/g) || [];
+    entities.push(...capitalizedWords);
+
+    // Extract entities from your graph
+    const graphEntities = await prisma.entity.findMany({
+      where: { userId: userId },
+      select: { name: true }
+    });
+
+    const graphEntityNames = graphEntities.map(e => e.name);
+
+    // Find which graph entities are mentioned in conversation
+    const mentionedEntities = graphEntityNames.filter(name =>
+      conversationText.toLowerCase().includes(name.toLowerCase())
+    );
+
+    entities.push(...mentionedEntities);
+
+    // Return unique entities
+    return [...new Set(entities)];
   }
 }
 

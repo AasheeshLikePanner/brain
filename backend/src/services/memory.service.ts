@@ -3,15 +3,19 @@ import { llmService } from './llm.service';
 import { v4 as uuidv4 } from 'uuid';
 import { pipeline, env } from '@xenova/transformers';
 import { Prisma } from '@prisma/client';
+import { MemoryAssociationService } from './memory-association.service';
+import { memoryIndexService } from './memory-index.service';
 
 // Set the cache directory for transformers.js
 env.cacheDir = './.transformers-cache';
 
 class MemoryService {
   private reranker: any; // To store the loaded reranker pipeline
+  private associationService: MemoryAssociationService;
 
   constructor() {
     this.initReranker();
+    this.associationService = new MemoryAssociationService();
   }
 
   private async initReranker() {
@@ -24,17 +28,26 @@ class MemoryService {
     }
   }
 
-  async ingest(userId: string, content: string) {
+  async ingest(
+    userId: string,
+    content: string,
+    type: string = 'note',
+    importance: number = 0.5,
+    source: string = 'unknown',
+    recordedAt: string | null = null // Changed from temporal to recordedAt
+  ) {
     try {
       console.log('[MemoryService] Ingesting new memory...');
       const newMemory = await prisma.memory.create({
         data: {
           userId,
           content,
-          type: 'note',
+          type,
+          recordedAt: recordedAt ? new Date(recordedAt) : null, // Use recordedAt field
           metadata: {
-            importance: 0.5
-          }
+            importance,
+            source,
+          },
         },
       });
       console.log(`[MemoryService] Memory ${newMemory.id} created. Generating embedding...`);
@@ -115,100 +128,56 @@ class MemoryService {
     return updatedMemory;
   }
 
-  async getContext(userId: string, query: string, limit: number = 5): Promise<{ contextString: string; sources: { id: string; content: string }[] }> {
-    console.log(`[MemoryService] Getting context for query: "${query}"`);
+  async getContext(
+    userId: string,
+    query: string,
+    limit: number = 3
+  ): Promise<{ contextString: string; sources: { id: string; content: string }[] }> {
+    // ... existing broad query detection ...
 
-    const broadQueryKeywords = ['summarize', 'summary', 'week', 'day', 'month', 'last week', 'last day', 'last month', 'yesterday', 'what happened'];
-    const isBroadQuery = broadQueryKeywords.some(keyword => query.toLowerCase().includes(keyword));
+    // Get top memories with smart scoring
+    let memories = await memoryIndexService.searchMemories(
+      userId,
+      query,
+      limit * 2  // Get more initially
+    );
 
-    let finalContextString = "";
-    let finalSources: { id: string; content: string }[] = [];
+    // For each top memory, get associated memories (constellation effect)
+    const memoryConstellation: any[] = [];
+    const seenIds = new Set<string>();
 
-    if (isBroadQuery) {
-      console.log('[MemoryService] Detected broad query, attempting to retrieve summaries.');
-      const relevantSummaries = await prisma.summary.findMany({
-        where: {
-          userId: userId,
-          level: 1, // Daily summaries
-          createdAt: {
-            gte: new Date(new Date().setDate(new Date().getDate() - 7)), // Last 7 days
-          },
-        },
-        orderBy: {
-          createdAt: 'desc',
-        },
-        take: 3, // Get top 3 recent summaries
-      });
+    for (const memory of memories.slice(0, limit)) {
+      if (seenIds.has(memory.id)) continue;
+      
+      const withAssociations = await this.associationService.getMemoryWithAssociations(memory.id);
+      
+      memoryConstellation.push(withAssociations.primary);
+      seenIds.add(memory.id);
 
-      if (relevantSummaries.length > 0) {
-        const summaryContext = relevantSummaries.map(s => `[id: ${s.id}] Summary (Level ${s.level}): ${s.content}`).join('\n---\n');
-        finalContextString += `High-Level Summaries:\n${summaryContext}\n\n`;
-        finalSources = finalSources.concat(relevantSummaries.map(s => ({ id: s.id, content: s.content })));
+      // Add top 2 associated memories
+      for (const assoc of withAssociations.associated.slice(0, 2)) {
+        if (!seenIds.has(assoc.id)) {
+          memoryConstellation.push(assoc);
+          seenIds.add(assoc.id);
+        }
       }
     }
 
-    // Always perform detailed memory retrieval, but potentially combine with summaries
-    // 1. Create an embedding for the user's query
-    const queryEmbedding = await llmService.createEmbedding(query);
-    const vectorString = `[${queryEmbedding.join(',')}]`;
+    // ... existing reranking logic ...
 
-    // 2. Find the most relevant memories using a weighted score of similarity and importance
-    const rawRelevantMemories: { id: string; content: string; similarity: number; rerankScore?: number }[] = await prisma.$queryRaw`
-      SELECT 
-        m.id, 
-        m.content, 
-        (1 - (e.embedding <=> ${vectorString}::vector)) as similarity,
-        (1 - (e.embedding <=> ${vectorString}::vector)) + COALESCE((m.metadata->>'importance')::numeric, 0.5) * 0.5 AS final_score
-      FROM memories m
-      JOIN embeddings e ON m.id = e."memoryId"
-      WHERE 
-        m."userId" = ${userId}
-        AND m.deleted = false
-      ORDER BY final_score DESC
-      LIMIT 15
-    `;
-    console.log(`[MemoryService] Found ${rawRelevantMemories.length} raw relevant memories.`);
-
-    if (rawRelevantMemories.length === 0 && finalSources.length === 0) {
-      return { contextString: "No relevant memories found.", sources: [] };
-    }
-
-    // 3. Add a Similarity Threshold Filter
-    const SIMILARITY_THRESHOLD = 0.78;
-    let filteredMemories = rawRelevantMemories.filter(r => r.similarity >= SIMILARITY_THRESHOLD);
-    console.log(`[MemoryService] ${filteredMemories.length} memories passed the similarity threshold.`);
-
-    if (filteredMemories.length === 0 && rawRelevantMemories.length > 0) {
-      console.warn('[MemoryService] No memories met the similarity threshold. Falling back to top 2.');
-      filteredMemories = rawRelevantMemories.slice(0, 2);
-    }
-
-    // 4. Reranking
-    let finalResults = filteredMemories;
-    if (this.reranker) {
-      const reranked = await Promise.all(filteredMemories.map(async (mem) => {
-        const res = await this.reranker([query, mem.content]);
-        const score = Array.isArray(res) ? res[0].score : res.score;
-        return { ...mem, rerankScore: score };
-      }));
-      finalResults = reranked.sort((a, b) => (b.rerankScore || 0) - (a.rerankScore || 0));
-      console.log('[MemoryService] Reranked memories:', finalResults.map(r => ({ content: r.content.substring(0, 50) + '...', rerankScore: r.rerankScore })));
-    } else {
-      console.warn('[MemoryService] Reranker not initialized. Skipping reranking step.');
-    }
-
-    // 5. Take top `limit` after filtering and reranking
-    const topMemories = finalResults.slice(0, limit);
-
-    // 6. Format the context string with IDs and return the sources
-    const memoryContextString = topMemories
-      .map(mem => `[id: ${mem.id}] ${mem.content}`)
-      .join('\n---\n');
+    // Format context with associations clearly marked
+    const contextString = memoryConstellation
+      .slice(0, limit + 2) // Allow a few extra from associations
+      .map((m, i) => {
+        const isAssociated = !memories.find(mem => mem.id === m.id);
+        const prefix = isAssociated ? '(Related)' : '';
+        return `${prefix}[${i + 1}] ${m.content}`;
+      })
+      .join('\n');
     
-    finalContextString += `Detailed Memories:\n${memoryContextString}`;
-    finalSources = finalSources.concat(topMemories.map(mem => ({ id: mem.id, content: mem.content })));
+    const sources = memoryConstellation.slice(0, limit + 2).map(m => ({ id: m.id, content: m.content }));
 
-    return { contextString: finalContextString, sources: finalSources };
+    return { contextString, sources };
   }
 
   async retrieve(userId: string, query: string): Promise<string> {

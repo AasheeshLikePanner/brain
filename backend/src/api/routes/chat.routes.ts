@@ -7,13 +7,14 @@ const router = Router();
 // POST /api/chat
 router.post('/', chatController.createChat);
 
+// Route to get proactive alerts
+// GET /api/chat/proactive
+router.get('/proactive', chatController.getProactiveAlerts);
+
 // Route to get all messages for a specific chat
 // GET /api/chat/:chatId
 router.get('/:chatId', chatController.getChatHistory);
 
-// Route to send a message to a chat and get a streamed response
-// POST /api/chat/:chatId/messages
-router.post('/:chatId/messages', chatController.streamMessage);
 
 // Keep old routes for now, but we can deprecate them later
 router.post('/ingest', chatController.handleIngest);

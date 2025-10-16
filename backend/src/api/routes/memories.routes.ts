@@ -11,4 +11,9 @@ router.post('/:memoryId/reinforce', memoriesController.reinforceMemory);
 // DELETE /api/memories/:memoryId
 router.delete('/:memoryId', memoriesController.deleteMemory);
 
+// Route to get all memories for the placeholder user
+// GET /api/memories/all
+router.get('/all', memoriesController.getAllMemories);
+
+
 export default router;

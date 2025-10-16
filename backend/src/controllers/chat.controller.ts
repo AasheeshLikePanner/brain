@@ -2,61 +2,104 @@ import { Request, Response } from 'express';
 import { memoryService } from '../services/memory.service';
 import { chatService } from '../services/chat.service';
 import prisma from '../db';
+import { ProactiveService } from '../services/proactive.service';
 
 class ChatController {
+  private proactiveService: ProactiveService;
+
+  constructor() {
+    this.proactiveService = new ProactiveService();
+  }
 
   // Hardcoded user for now. In a real app, this would come from auth middleware.
   private placeholderUserId = '123e4567-e89b-12d3-a456-426614174000';
 
-  private ensureUser = async (): Promise<string> => {
+  private ensureUser = async (id: string | undefined = undefined): Promise<string> => {
+    const targetUserId = id || this.placeholderUserId;
     try {
-      console.log(`[ChatController] Ensuring user ${this.placeholderUserId} exists...`);
-      
+      console.log(`[ChatController] Ensuring user ${targetUserId} exists...`);
+
       // Try to find user first
       let user = await prisma.user.findUnique({
-        where: { id: this.placeholderUserId }
+        where: { id: targetUserId }
       });
 
       if (!user) {
-        console.log(`[ChatController] Creating user ${this.placeholderUserId}...`);
+        console.log(`[ChatController] Creating user ${targetUserId}...`);
         user = await prisma.user.create({
-          data: { 
-            id: this.placeholderUserId, 
-            email: 'placeholder@example.com' 
+          data: {
+            id: targetUserId,
+            email: 'placeholder@example.com'
           }
         });
-        console.log(`[ChatController] User ${this.placeholderUserId} created.`);
+        console.log(`[ChatController] User ${targetUserId} created.`);
       } else {
-        console.log(`[ChatController] User ${this.placeholderUserId} already exists.`);
+        console.log(`[ChatController] User ${targetUserId} already exists.`);
       }
-      
-      return this.placeholderUserId;
+
+      return targetUserId;
     } catch (error) {
       console.error("Failed to ensure user exists", error);
       throw error; // Don't handle response here, let the calling method handle it
     }
   }
 
-  createChat = async (req: Request, res: Response) => {
-    const { message } = req.body;
-    if (!message) {
-      return res.status(400).json({ error: 'Initial message is required' });
-    }
-
+  getProactiveAlerts = async (req: Request, res: Response) => {
     try {
-      const userId = await this.ensureUser();
-      const chat = await chatService.createChat(userId, message);
-      res.status(201).json(chat);
+      // For testing without auth, get userId from header. In production, this would come from auth middleware.
+      // For testing without auth, get userId from header. In production, this would come from auth middleware.
+      const userId = await this.ensureUser(req.headers['x-user-id'] as string | undefined);
+      const alerts = await this.proactiveService.generateProactiveAlerts(userId);
+      console.log('[ChatController] Generated proactive alerts:', alerts);
+      const formatted = this.proactiveService.formatAlertsForDisplay(alerts);
+
+      res.status(200).json({
+        alerts,
+        formatted,
+        count: alerts.length
+      });
     } catch (error) {
-      console.error('Error creating chat:', error);
-      res.status(500).json({ error: 'Failed to create chat.' });
+      console.error('Error getting proactive alerts:', error);
+      res.status(500).json({ error: 'Failed to generate proactive alerts' });
     }
   }
 
-  getChatHistory = async (req: Request, res: Response) => {
+  /**
+   * ENHANCED: Optionally inject proactive alerts at conversation start
+   */
+  createChat = async (req: Request, res: Response) => {
+    try {
+      const { message, includeProactive = false } = req.body;
+
+      // For testing without auth, get userId from header. In production, this would come from auth middleware.
+      const userId = await this.ensureUser(req.headers['x-user-id'] as string | undefined);
+
+      // Create chat and get initial response
+      const chat = await chatService.createChat(userId, message);
+
+      // Optionally include proactive alerts
+      let proactiveContext = '';
+      if (includeProactive) {
+        const alerts = await this.proactiveService.generateProactiveAlerts(userId);
+        if (alerts.length > 0) {
+          proactiveContext = this.proactiveService.formatAlertsForDisplay(alerts);
+        }
+      }
+
+      res.status(201).json({
+        ...chat,
+        proactiveAlerts: proactiveContext
+      });
+    } catch (error) {
+      console.error('Error creating chat:', error);
+      res.status(500).json({ error: 'Failed to create chat' });
+    }
+  }
+  getChatHistory = async (req: Request, res:Response) => {
     const { chatId } = req.params;
     try {
-      const userId = await this.ensureUser();
+      // For testing without auth, get userId from header. In production, this would come from auth middleware.
+      const userId = await this.ensureUser(req.headers['x-user-id'] as string | undefined);
       const history = await chatService.getChatHistory(chatId, userId);
       res.status(200).json(history);
     } catch (error) {
@@ -71,14 +114,12 @@ class ChatController {
     const { message } = req.body;
     console.log(`[ChatController] Chat ID: ${chatId}, Message: "${message}"`);
 
-    if (!message) {
-      return res.status(400).json({ error: 'Message is required' });
-    }
-
     try {
-      const userId = await this.ensureUser();
+      // For testing without auth, get userId from header. In production, this would come from auth middleware.
+      const userId = await this.ensureUser(req.headers['x-user-id'] as string | undefined);
       const stream = await chatService.streamChatResponse(chatId, userId, message);
-      
+
+
       res.setHeader('Content-Type', 'application/octet-stream');
       stream.pipeTo(new WritableStream({
         write(chunk) {
@@ -98,18 +139,19 @@ class ChatController {
   // --- Legacy Methods ---
   handleIngest = async (req: Request, res: Response) => {
     console.log('[ChatController] Received request to handleIngest.');
-    const { content } = req.body;
-    
+    const { content, temporal } = req.body; // Extract temporal
+
     if (!content) {
       return res.status(400).json({ error: 'Content is required' });
     }
-    
+
     try {
-      console.log('[ChatController] Calling ensureUser...');
-      const userId = await this.ensureUser();
+      // For testing without auth, get userId from header. In production, this would come from auth middleware.
+      const userId = await this.ensureUser(req.headers['x-user-id'] as string | undefined);
       console.log('[ChatController] ensureUser completed. Proceeding with memory ingestion...');
-      
-      const newMemory = await memoryService.ingest(userId, content);
+
+      const recordedAtValue = (temporal !== undefined && temporal !== null) ? temporal : null;
+      const newMemory = await memoryService.ingest(userId, content, 'note', 0.5, 'unknown', recordedAtValue as string | null); // Pass temporal to recordedAt
       res.status(201).json({ message: 'Memory ingested successfully', memory: newMemory });
     } catch (error) {
       console.error('Error ingesting memory:', error);
@@ -123,8 +165,9 @@ class ChatController {
       return res.status(400).json({ error: 'Query is required' });
     }
     try {
-      const userId = await this.ensureUser();
-      const response = await memoryService.retrieve(this.placeholderUserId, query);
+      // For testing without auth, get userId from header. In production, this would come from auth middleware.
+      const userId = await this.ensureUser(req.headers['x-user-id'] as string | undefined);
+      const response = await memoryService.retrieve(userId, query);
       res.status(200).json({ response });
     } catch (error) {
       // ensureUser will have already sent a response on failure

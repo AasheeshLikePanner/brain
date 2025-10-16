@@ -33,7 +33,7 @@ export const extractTriplets = async () => {
           isTripletExtracted: false,
           deleted: false,
         },
-        select: { id: true, content: true },
+        select: { id: true, content: true, metadata: true }, // Select metadata to update it
       });
 
       // Fetch unprocessed chat messages
@@ -46,7 +46,7 @@ export const extractTriplets = async () => {
       });
 
       const allUnprocessedContent = [
-        ...unprocessedMemories.map(m => ({ id: m.id, type: 'memory', content: m.content })),
+        ...unprocessedMemories.map(m => ({ id: m.id, type: 'memory', content: m.content, metadata: m.metadata })),
         ...unprocessedChatMessages.map(cm => ({ id: cm.id, type: 'chatMessage', content: cm.content })),
       ];
 
@@ -58,7 +58,7 @@ export const extractTriplets = async () => {
       // Process each content item individually to get sourceId for triplets
       for (const contentItem of allUnprocessedContent) {
         const prompt = `From the following text, extract knowledge triplets in the format of a JSON array of objects: [{ "subject": "", "predicate": "", "object": "" }].
-For each triplet, also include the "sourceId" and "sourceType" from the provided context. The sourceId is ${contentItem.id} and sourceType is ${contentItem.type}.
+For each triplet, also include the "sourceId" and "sourceType" from the provided context. The sourceId is "${contentItem.id}" and sourceType is "${contentItem.type}".
 Focus on factual information, relationships between entities, and key actions. Ensure subjects and objects are specific entities.
 
 Text:
@@ -67,6 +67,7 @@ ${contentItem.content}
 Triplets (JSON array):`;
 
         const llmResponse = await llmService.generateCompletion(prompt);
+        console.log(`[TripletExtractionJob] LLM Raw Response for ${contentItem.id}:`, llmResponse); // ADDED LOG
 
         if (llmResponse) {
           try {
@@ -81,7 +82,9 @@ Triplets (JSON array):`;
                 cleanedResponse = directJsonMatch[0];
               }
             }
+            console.log(`[TripletExtractionJob] Cleaned LLM Response for ${contentItem.id}:`, cleanedResponse); // ADDED LOG
             const triplets: Triplet[] = JSON.parse(cleanedResponse);
+            console.log(`[TripletExtractionJob] Parsed Triplet Array for ${contentItem.id}:`, triplets); // ADDED LOG
             if (Array.isArray(triplets) && triplets.every(t => t.subject)) {
               // Inject sourceId and sourceType into each triplet
               const processedTriplets = triplets.map(t => ({
@@ -91,26 +94,50 @@ Triplets (JSON array):`;
               }));
               console.log(`[TripletExtractionJob] Extracted ${processedTriplets.length} triplets for content item ${contentItem.id}.`);
 
+              // Collect all unique entities from the triplets
+              const detectedEntities = Array.from(new Set([
+                ...processedTriplets.map(t => t.subject),
+                ...processedTriplets.map(t => t.object)
+              ])).filter(Boolean); // Filter out empty strings or nulls
+              console.log(`[TripletExtractionJob] Detected Entities for ${contentItem.id}:`, detectedEntities); // ADDED LOG
+
               for (const triplet of processedTriplets) {
-                // Ensure entities exist or create them
-                const [subjectEntity, objectEntity] = await Promise.all([
-                  prisma.entity.upsert({
-                    where: { userId_name: { userId: userId, name: triplet.subject } },
-                    update: {}, 
-                    create: { userId: userId, name: triplet.subject, type: 'unknown' },
-                  }),
-                  prisma.entity.upsert({
-                    where: { userId_name: { userId: userId, name: triplet.object } },
-                    update: {}, 
-                    create: { userId: userId, name: triplet.object, type: 'unknown' },
-                  }),
-                ]);
+                // Ensure subject is a valid string
+                let subjectName = String(triplet.subject || '').trim();
+                if (!subjectName) {
+                  console.warn(`[TripletExtractionJob] Skipping triplet due to invalid subject: ${JSON.stringify(triplet)}`);
+                  continue;
+                }
+
+                // Ensure object is a valid string, or null if not present
+                let objectName: string | null = null;
+                if (triplet.object && (typeof triplet.object === 'string' || Array.isArray(triplet.object))) {
+                  objectName = String(triplet.object).trim();
+                  if (objectName === '') objectName = null;
+                }
+
+                // Upsert subject entity
+                const subjectEntity = await prisma.entity.upsert({
+                  where: { userId_name: { userId: userId, name: subjectName } },
+                  update: {},
+                  create: { userId: userId, name: subjectName, type: 'unknown' },
+                });
+
+                let objectEntity = null;
+                if (objectName) {
+                  // Upsert object entity if it exists
+                  objectEntity = await prisma.entity.upsert({
+                    where: { userId_name: { userId: userId, name: objectName } },
+                    update: {},
+                    create: { userId: userId, name: objectName, type: 'unknown' },
+                  });
+                }
 
                 // Create entity link
                 await prisma.entityLink.create({
                   data: {
                     entityId: subjectEntity.id,
-                    objectId: objectEntity.id,
+                    objectId: objectEntity?.id, // Use optional chaining for objectId
                     memoryId: triplet.sourceType === 'memory' ? triplet.sourceId : null,
                     chatMessageId: triplet.sourceType === 'chatMessage' ? triplet.sourceId : null,
                     role: triplet.predicate,
@@ -118,13 +145,24 @@ Triplets (JSON array):`;
                 });
               }
 
-              // Mark processed content as isTripletExtracted = true
+              // Mark processed content as isTripletExtracted = true and update metadata.entities
               if (contentItem.type === 'memory') {
+                const existingMemory = await prisma.memory.findUnique({
+                  where: { id: contentItem.id },
+                  select: { metadata: true }
+                });
                 await prisma.memory.update({
                   where: { id: contentItem.id },
-                  data: { isTripletExtracted: true },
+                  data: {
+                    isTripletExtracted: true,
+                    metadata: {
+                      ...(existingMemory?.metadata as Prisma.JsonObject || {}),
+                      detected_entities: detectedEntities
+                    }
+                  },
                 });
               } else if (contentItem.type === 'chatMessage') {
+                // ChatMessage model does not have a metadata field, so we cannot update metadata.entities
                 await prisma.chatMessage.update({
                   where: { id: contentItem.id },
                   data: { isTripletExtracted: true },

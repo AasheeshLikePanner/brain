@@ -59,6 +59,12 @@ model Memory {
   deleted           Boolean     @default(false)
   isSummarized      Boolean     @default(false)
   isTripletExtracted Boolean     @default(false)
+  
+  // NEW FIELDS for smart weighting
+  accessCount       Int      @default(0)
+  lastAccessedAt    DateTime @default(now())
+  confidenceScore   Float    @default(1.0)  // For forgetting mechanism
+  
   user              User        @relation(fields: [userId], references: [id], onDelete: Cascade)
   embeddings        Embedding[]
   entityLinks       EntityLink[]
