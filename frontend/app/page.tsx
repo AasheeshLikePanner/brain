@@ -3,7 +3,7 @@ import { LoginDialog } from '@/components/LoginDialog';
 
 export default function Home() {
   return (
-    <div className="relative flex flex-col h-screen bg-background text-foreground justify-center">
+    <div className="relative flex flex-col h-screen text-foreground justify-center">
       <div className="absolute top-4 right-4">
         <LoginDialog />
       </div>
