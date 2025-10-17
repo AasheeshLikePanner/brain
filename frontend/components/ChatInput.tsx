@@ -57,7 +57,7 @@ export function ChatInput() {
   return (
     <form
       onSubmit={handleSubmit}
-      className={`w-full max-w-2xl rounded-2xl border-2 border-border bg-card shadow-xl shadow-black/5 relative overflow-hidden transition-[min-height] duration-500 ease-in-out ${
+      className={`w-full max-w-2xl rounded-2xl border-2 border-border bg-card relative overflow-hidden transition-[min-height] duration-500 ease-in-out ${
         isRecording ? 'min-h-[220px]' : 'min-h-[120px]'
       }`}>
       <div

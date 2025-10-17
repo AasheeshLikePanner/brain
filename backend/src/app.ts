@@ -3,6 +3,7 @@ console.log('--- NODEMON APP.TS CHANGE TEST ---');
 import express, { Request, Response } from 'express';
 import chatRoutes from './api/routes/chat.routes';
 import memoriesRoutes from './api/routes/memories.routes';
+import authRoutes from './api/routes/auth.routes'; // New: Import auth routes
 import cors from 'cors';
 import cron from 'node-cron';
 import { archiveOldMemories } from './jobs/archiving.job';
@@ -17,6 +18,12 @@ import { MemoryAssociationService } from './services/memory-association.service'
 import { ProactiveService } from './services/proactive.service';
 import prisma from './db';
 
+// New: Passport imports
+import passport from 'passport';
+import { Strategy as GoogleStrategy, Profile } from 'passport-google-oauth20';
+// import session from 'express-session'; // Removed: Not needed for token-based auth
+import { authService } from './services/auth.service';
+
 
 const app = express();
 const proactiveService = new ProactiveService();
@@ -28,6 +35,49 @@ app.use(express.json());
 // Enable CORS for all routes
 app.use(cors());
 
+// New: Configure express-session (Removed: Not needed for token-based auth)
+// app.use(session({
+//   secret: process.env.SESSION_SECRET || 'supersecret', // Use a strong secret from .env
+//   resave: false,
+//   saveUninitialized: false,
+//   cookie: { maxAge: 24 * 60 * 60 * 1000 } // 24 hours
+// }));
+
+// New: Initialize Passport
+app.use(passport.initialize());
+// app.use(passport.session()); // Removed: Not needed for token-based auth
+
+// New: Passport Google Strategy
+passport.use(new GoogleStrategy({
+  clientID: process.env.GOOGLE_CLIENT_ID!,
+  clientSecret: process.env.GOOGLE_CLIENT_SECRET!,
+  callbackURL: `${process.env.BACKEND_URL}/api/auth/google/callback`, // Changed to absolute URL
+},
+async (accessToken: string, refreshToken: string, profile: Profile, done: Function) => {
+  try {
+    const user = await authService.findOrCreateUser(profile);
+    // For token-based auth, we don't need to serialize/deserialize the user into the session.
+    // We just pass the user object to the done callback.
+    done(null, user);
+  } catch (error) {
+    done(error, null);
+  }
+}));
+
+// New: Serialize and Deserialize User (Removed: Not needed for token-based auth)
+// passport.serializeUser((user: any, done) => {
+//   done(null, user.id);
+// });
+
+// passport.deserializeUser(async (id: string, done) => {
+//   try {
+//     const user = await prisma.user.findUnique({ where: { id } });
+//     done(null, user);
+//   } catch (error) {
+//     done(error, null);
+//   }
+// });
+
 // Health check route
 app.get('/', (req: Request, res: Response) => {
   res.send('Second Brain Backend is running!');
@@ -38,14 +88,6 @@ app.get('/test', (req, res) => {
   res.send('Test route works!');
 });
 
-// app.get('/api/chat/proactive', async (req, res) => {
-//   console.log('[App] /api/chat/proactive route hit directly in app.ts!');
-//   const userId = '123e4567-e89b-12d3-a456-426614174000'; // Hardcode for testing
-//   const alerts = await proactiveService.generateProactiveAlerts(userId);
-//   console.log('[App] Generated proactive alerts directly in app.ts:', alerts);
-//   res.json(alerts);
-// });
-
 // Use the chat routes
 app.use('/api/chat', chatRoutes);
 
@@ -54,6 +96,9 @@ app.use('/api/memories', memoriesRoutes);
 
 // Use the graph routes
 app.use('/api/graph', graphRoutes);
+
+// New: Use the auth routes
+app.use('/api/auth', authRoutes);
 
 app.listen(port, async () => {
   console.log(`Server is listening on port ${port}`);

@@ -9,14 +9,30 @@ datasource db {
   extensions = [vector]
 }
 
+enum SubscriptionType {
+  FREE
+  PRO
+  PLUS
+}
+
 model User {
-  id         String    @id @default(uuid())
-  email      String?   @unique
-  createdAt  DateTime  @default(now())
-  memories   Memory[]
-  entities   Entity[]
-  summaries  Summary[]
-  chats      Chat[]
+  id                       String           @id @default(uuid())
+  googleId                 String?          @unique // New: Google's unique ID for the user
+  email                    String           @unique // Ensure non-nullable for login
+  name                     String?          // New: User's full name
+  avatarUrl                String?          // New: URL to user's profile picture
+  createdAt                DateTime         @default(now())
+  updatedAt                DateTime         @updatedAt // New: Automatically updated timestamp
+  lastLoginAt              DateTime?        // New: Last login timestamp
+
+  subscriptionType         SubscriptionType @default(PLUS) // New: Subscription level
+  subscriptionPurchaseDate DateTime?        // New: Date subscription was purchased
+  subscriptionExpiryDate   DateTime?        // New: Date subscription expires
+
+  memories                 Memory[]
+  entities                 Entity[]
+  summaries                Summary[]
+  chats                    Chat[]
 
   @@map("users")
 }
