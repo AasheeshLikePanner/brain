@@ -17,10 +17,10 @@ chrome.contextMenus.onClicked.addListener((info, tab) => {
   if (info.menuItemId === "saveToBrain") {
     const selectedText = info.selectionText;
     console.log("Text selected from context menu (Save to Brain):", selectedText);
-    alert(`Selected text saved to Brain: "${selectedText}"`);
+    console.log(`Selected text saved to Brain: "${selectedText}"`);
   } else if (info.menuItemId === "askToBrain") {
     const selectedText = info.selectionText;
     console.log("Text selected from context menu (Ask to Brain):", selectedText);
-    alert(`Asking Brain about: "${selectedText}"`);
+    console.log(`Asking Brain about: "${selectedText}"`);
   }
 });

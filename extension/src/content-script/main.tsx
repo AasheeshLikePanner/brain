@@ -79,9 +79,41 @@ const injectIconIntoTweet = (tweetElement: HTMLElement) => {
     // Add click listener to the new button
     iconContainer.addEventListener('click', (e) => {
       e.stopPropagation(); // Prevent tweet click event
+
       const tweetTextElement = tweetElement.querySelector('div[data-testid="tweetText"]');
       const tweetText = tweetTextElement ? tweetTextElement.textContent : 'No text found';
-      alert(`Brain Extension: Processing tweet - "${tweetText}"`);
+
+      const tweetLinkElement = tweetElement.querySelector('a[href*="/status/"]');
+      const tweetUrl = tweetLinkElement ? tweetLinkElement.getAttribute('href') : 'No tweet URL found';
+
+      const imageUrls: string[] = [];
+      tweetElement.querySelectorAll('img').forEach(img => {
+        const src = img.getAttribute('src');
+        if (src && !src.includes('profile_images') && !src.includes('emoji')) { // Exclude profile pictures and emojis
+          imageUrls.push(src);
+        }
+      });
+
+      const videoUrls: string[] = [];
+      tweetElement.querySelectorAll('video').forEach(video => {
+        const src = video.getAttribute('src');
+        const poster = video.getAttribute('poster');
+        if (src && src.startsWith('blob:')) {
+          if (poster) {
+            videoUrls.push(`Blob video (using poster): ${poster}`);
+          } else {
+            videoUrls.push(`Blob video (no poster found): ${src}`);
+          }
+        } else if (src) {
+          videoUrls.push(src);
+        }
+      });
+
+      console.log("Brain Extension: Processing Tweet:");
+      console.log("  Text:", tweetText);
+      console.log("  URL:", tweetUrl);
+      console.log("  Image URLs:", imageUrls);
+      console.log("  Video URLs:", videoUrls);
     });
 
     // Inject the icon container into the action bar
@@ -164,7 +196,7 @@ const injectMeetingButtonIntoCalendar = (eventDialogElement: HTMLElement) => {
           const eventTitle = eventTitleElement ? eventTitleElement.textContent : 'No event title found';
           const meetLinkElement = eventDialogElement.querySelector('a[href^="https://meet.google.com/"]');
           const meetLink = meetLinkElement ? (meetLinkElement as HTMLAnchorElement).href : 'No Meet link found';
-          alert(`Brain Extension: Processing Calendar Event - Title: "${eventTitle}", Meet Link: "${meetLink}"`);
+          console.log(`Brain Extension: Processing Calendar Event - Title: "${eventTitle}", Meet Link: "${meetLink}"`);
         });
 
         brainButtonSpanWrapper.appendChild(brainButton);
@@ -231,7 +263,26 @@ const injectIconIntoGmailEmail = (emailRowElement: HTMLElement) => {
           e.stopPropagation();
           const emailSubjectElement = emailRowElement.querySelector('.bqe');
           const emailSubject = emailSubjectElement ? emailSubjectElement.textContent : 'No subject found';
-          alert(`Brain Extension: Processing Gmail - "${emailSubject}"`);
+
+          const emailSenderElement = emailRowElement.querySelector('.yP');
+          const emailSender = emailSenderElement ? emailSenderElement.textContent : 'No sender found';
+
+          const emailSnippetElement = emailRowElement.querySelector('.y2');
+          const emailSnippet = emailSnippetElement ? emailSnippetElement.textContent : 'No snippet found';
+
+          const emailLinks: string[] = [];
+          emailRowElement.querySelectorAll('a').forEach(link => {
+            const href = link.getAttribute('href');
+            if (href) {
+              emailLinks.push(href);
+            }
+          });
+
+          console.log("Brain Extension: Processing Gmail:");
+          console.log("  Subject:", emailSubject);
+          console.log("  Sender:", emailSender);
+          console.log("  Snippet:", emailSnippet);
+          console.log("  Links:", emailLinks);
         });
 
         toolbarTd.appendChild(iconContainer);
