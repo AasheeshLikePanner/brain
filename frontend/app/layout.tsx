@@ -5,6 +5,8 @@ import { Toaster } from "@/components/ui/sonner";
 import { SplashScreen } from "@/components/SplashScreen";
 import { AuthProvider } from "@/lib/authContext"; // Re-import AuthProvider
 
+import { Header } from "@/components/Header";
+
 const poppins = Poppins({
   subsets: ["latin"],
   weight: ["400", "500", "700"],
@@ -25,6 +27,7 @@ export default function RootLayout({
     <html lang="en" className="dark">
       <body className={`${poppins.variable} font-sans antialiased`}>
         <AuthProvider> {/* Wrap children with AuthProvider */}
+          <Header />
           <SplashScreen />
           {children}
           <Toaster />

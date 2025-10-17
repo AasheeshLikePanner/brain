@@ -5,12 +5,12 @@ import passport from 'passport';
 const router = Router();
 
 // Route to initiate Google OAuth
-router.get('/google', passport.authenticate('google', { scope: ['profile', 'email'] }));
+router.get('/google', passport.authenticate('google', { scope: ['profile', 'email'], session: false }));
 
 // Callback route after Google OAuth
 router.get(
   '/google/callback',
-  passport.authenticate('google', { failureRedirect: '/login' }),
+  passport.authenticate('google', { failureRedirect: '/login', session: false }),
   authController.googleCallback
 );
 

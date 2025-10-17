@@ -48,6 +48,7 @@ app.use(passport.initialize());
 // app.use(passport.session()); // Removed: Not needed for token-based auth
 
 // New: Passport Google Strategy
+console.log(`Google OAuth Callback URL: ${process.env.BACKEND_URL}/api/auth/google/callback`); // Moved console.log here
 passport.use(new GoogleStrategy({
   clientID: process.env.GOOGLE_CLIENT_ID!,
   clientSecret: process.env.GOOGLE_CLIENT_SECRET!,

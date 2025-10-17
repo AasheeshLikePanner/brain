@@ -10,9 +10,55 @@ export const authController = {
     if (req.user && (req.user as PrismaUser).id) {
       const user = req.user as PrismaUser; // Assert req.user as PrismaUser
       const token = generateToken(user.id);
-      res.json({ message: 'Authentication successful', token, user: user });
+      const frontendOrigin = process.env.FRONTEND_URL || 'http://localhost:3000'; // Fallback for safety
+
+      const htmlResponse = `
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>Authentication Confirmation</title>
+            <script>
+                window.onload = () => {
+                    const token = "${token}";
+                    const user = ${JSON.stringify(user)};
+                    const frontendOrigin = "${frontendOrigin}";
+
+                    if (window.opener) {
+                        window.opener.postMessage({ token, user }, frontendOrigin);
+                    }
+                    window.close();
+                };
+            </script>
+        </head>
+        <body>
+            <p>Authenticating...</p>
+        </body>
+        </html>
+      `;
+      res.send(htmlResponse);
     } else {
-      res.status(401).json({ message: 'Authentication failed: User object or ID missing.' });
+      const frontendOrigin = process.env.FRONTEND_URL || 'http://localhost:3000';
+      const htmlErrorResponse = `
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>Authentication Failed</title>
+            <script>
+                window.onload = () => {
+                    const frontendOrigin = "${frontendOrigin}";
+                    if (window.opener) {
+                        window.opener.postMessage({ message: 'Authentication failed' }, frontendOrigin);
+                    }
+                    window.close();
+                };
+            </script>
+        </head>
+        <body>
+            <p>Authentication failed.</p>
+        </body>
+        </html>
+      `;
+      res.status(401).send(htmlErrorResponse);
     }
   },
 
