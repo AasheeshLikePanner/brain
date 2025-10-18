@@ -14,6 +14,16 @@ class ChatService {
     this.reasoningService = new ReasoningService();
   }
 
+  async createChatSession(userId: string, title: string): Promise<Chat> {
+    const chat = await prisma.chat.create({
+      data: {
+        userId,
+        title: title.substring(0, 50),
+      }
+    });
+    return chat;
+  }
+
   async createChat(userId: string, initialMessage: string): Promise<Chat> {
     const chat = await prisma.chat.create({
       data: {

@@ -31,10 +31,31 @@ axios.interceptors.response.use(response => response, error => {
 
 export async function createChat(message: string): Promise<{ id: string }> {
   try {
-    const response = await axios.post(`${API_BASE_URL}/chat`, {
-      message,
+    const token = localStorage.getItem('jwt_token');
+    const response = await fetch(`${API_BASE_URL}/chat`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': token ? `Bearer ${token}` : '',
+      },
+      body: JSON.stringify({ message }),
     });
-    return response.data;
+
+    if (!response.ok) {
+      throw new Error(`Server error: ${response.status}`);
+    }
+
+    const chatId = response.headers.get('X-Chat-Id');
+    if (!chatId) {
+      throw new Error('Could not find X-Chat-Id header.');
+    }
+
+    // The response body is a stream but we don't need it here, so we cancel it.
+    if (response.body) {
+      response.body.cancel();
+    }
+
+    return { id: chatId };
   } catch (error) {
     console.error('Error creating chat:', error);
     throw new Error('Failed to create chat');
@@ -42,6 +63,21 @@ export async function createChat(message: string): Promise<{ id: string }> {
 }
 
 const GRAPH_API_URL = `${API_BASE_URL}/graph`;
+
+export async function getChatHistory(chatId: string): Promise<ChatMessage[]> {
+  try {
+    const token = localStorage.getItem('jwt_token');
+    const response = await axios.get(`${API_BASE_URL}/chat/${chatId}/history`, {
+      headers: {
+        'Authorization': token ? `Bearer ${token}` : '',
+      },
+    });
+    return response.data;
+  } catch (error) {
+    console.error('Error fetching chat history:', error);
+    throw new Error('Failed to get chat history');
+  }
+}
 
 export async function getGraphEntities(type?: string): Promise<any[]> {
   const params = type ? `?type=${type}` : '';

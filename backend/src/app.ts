@@ -1,5 +1,5 @@
+console.log('--- GEMINI DEBUG: SERVER RESTART CONFIRMED ---');
 import 'dotenv/config';
-console.log('--- NODEMON APP.TS CHANGE TEST ---');
 import express, { Request, Response } from 'express';
 import chatRoutes from './api/routes/chat.routes';
 import memoriesRoutes from './api/routes/memories.routes';
@@ -32,8 +32,10 @@ const port = process.env.PORT || 8080;
 // Middleware to parse JSON bodies
 app.use(express.json());
 
-// Enable CORS for all routes
-app.use(cors());
+// Enable CORS for all routes and expose custom headers
+app.use(cors({
+  exposedHeaders: ['X-Chat-Id'],
+}));
 
 // New: Configure express-session (Removed: Not needed for token-based auth)
 // app.use(session({

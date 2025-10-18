@@ -65,34 +65,48 @@ class ChatController {
   }
 
   /**
-   * ENHANCED: Optionally inject proactive alerts at conversation start
+   * ENHANCED: Creates a new chat and immediately streams the response,
+   * returning the new chat's ID in the X-Chat-Id header.
    */
   createChat = async (req: Request, res: Response) => {
-    try {
-      const { message, includeProactive = false } = req.body;
+    console.log('\n[ChatController] Received request to create chat and stream message.');
+    const { message } = req.body;
+    console.log(`[ChatController] Message: "${message}"`);
 
-      // For testing without auth, get userId from header. In production, this would come from auth middleware.
+    if (!message) {
+      return res.status(400).json({ error: 'Message is required' });
+    }
+
+    try {
       const userId = await this.ensureUser(req.headers['x-user-id'] as string | undefined);
 
-      // Create chat and get initial response
-      const chat = await chatService.createChat(userId, message);
+      // 1. Create a new chat session to get a chatId
+      const newChat = await chatService.createChatSession(userId, message);
+      const chatId = newChat.id;
+      console.log(`[ChatController] Created new chat with ID: ${chatId}`);
 
-      // Optionally include proactive alerts
-      let proactiveContext = '';
-      if (includeProactive) {
-        const alerts = await this.proactiveService.generateProactiveAlerts(userId);
-        if (alerts.length > 0) {
-          proactiveContext = this.proactiveService.formatAlertsForDisplay(alerts);
+      // 2. Set the chatId in a header so the frontend can perform routing
+      res.setHeader('X-Chat-Id', chatId);
+
+      // 3. Stream the response for the initial message
+      const stream = await chatService.streamChatResponse(chatId, userId, message);
+
+      res.setHeader('Content-Type', 'application/octet-stream');
+      stream.pipeTo(new WritableStream({
+        write(chunk) {
+          res.write(chunk);
+        },
+        close() {
+          res.end();
         }
-      }
+      }));
 
-      res.status(201).json({
-        ...chat,
-        proactiveAlerts: proactiveContext
-      });
     } catch (error) {
-      console.error('Error creating chat:', error);
-      res.status(500).json({ error: 'Failed to create chat' });
+      console.error('Error creating chat and streaming response:', error);
+      // Ensure response is sent only if headers haven't been sent
+      if (!res.headersSent) {
+        res.status(500).json({ error: 'Failed to create chat and stream response.' });
+      }
     }
   }
   getChatHistory = async (req: Request, res:Response) => {

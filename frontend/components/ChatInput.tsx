@@ -5,7 +5,6 @@ import { useRouter } from 'next/navigation';
 import { Button } from '@/components/ui/button';
 import { Mic, ArrowUpIcon, MicOff } from 'lucide-react';
 import TextareaAutosize from 'react-textarea-autosize';
-import { createChat } from '@/lib/api';
 import { toast } from 'sonner';
 
 // Helper to format time from seconds to MM:SS
@@ -17,12 +16,19 @@ const formatTime = (totalSeconds: number) => {
   return `${minutes}:${seconds}`;
 };
 
-export function ChatInput() {
+export function ChatInput({ setExternalMessage, isReplying }: { setExternalMessage?: (message: string) => void, isReplying?: boolean }) {
   const [message, setMessage] = useState('');
   const [isRecording, setIsRecording] = useState(false);
   const [seconds, setSeconds] = useState(0);
   const [isLoading, setIsLoading] = useState(false);
   const router = useRouter();
+
+  // Expose setMessage to parent if setExternalMessage is provided
+  useEffect(() => {
+    if (setExternalMessage) {
+      setExternalMessage(() => setMessage);
+    }
+  }, [setExternalMessage]);
 
   useEffect(() => {
     let interval: NodeJS.Timeout;
@@ -43,11 +49,56 @@ export function ChatInput() {
 
     setIsLoading(true);
     try {
-      const newChat = await createChat(message);
-      toast.success('Chat created successfully!');
-      router.push(`/chat/${newChat.id}`);
+      // 1. Initiate the request
+      const token = localStorage.getItem('jwt_token');
+      const response = await fetch('http://localhost:8080/api/chat', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': token ? `Bearer ${token}` : '',
+        },
+        body: JSON.stringify({ message }),
+      });
+
+      if (!response.ok) {
+        throw new Error(`Server error: ${response.status}`);
+      }
+
+      // 2. Get the Chat ID from the header
+      const chatId = response.headers.get('X-Chat-Id');
+      if (!chatId) {
+        console.error('Could not find X-Chat-Id header.');
+        toast.error('Error creating chat: No chat ID returned.');
+        return;
+      }
+
+      // 3. Handle routing immediately
+      router.push(`/chat/${chatId}`);
+
+      // 4. Get the reader for the streaming body
+      if (!response.body) {
+        console.log("No response body to stream.");
+        return;
+      }
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let fullResponse = '';
+
+      // 5. Process the stream
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) {
+          break; // The stream is finished
+        }
+
+        const chunk = decoder.decode(value, { stream: true });
+        console.log("Stream chunk received:", chunk); // Log chunk for debugging
+        // NOTE: The component will likely unmount after router.push,
+        // so this part of the code may not execute as expected.
+      }
+
     } catch (error) {
-      console.error('Error creating chat:', error);
+      console.error('An error occurred during chat creation or streaming:', error);
       toast.error('Error creating chat. Please try again.');
     } finally {
       setIsLoading(false);
@@ -88,7 +139,7 @@ export function ChatInput() {
             <TextareaAutosize
               value={message}
               onChange={(e) => setMessage(e.target.value)}
-              placeholder="Ask anything..."
+              placeholder="Reply AI"
               className="w-full resize-none bg-transparent focus:outline-none text-base"
               minRows={1}
               maxRows={10}

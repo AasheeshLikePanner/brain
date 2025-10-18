@@ -1,5 +1,6 @@
 'use client';
 
+import { useSearchParams, useParams } from 'next/navigation';
 import { useState, useEffect } from 'react';
 import axios from 'axios';
 import { Button } from "@/components/ui/button";
@@ -27,8 +28,9 @@ const formatTime = (totalSeconds: number) => {
   return `${minutes}:${seconds}`;
 };
 
-export default function ChatPage({ params }: { params: { chatId: string } }) {
-  const { chatId } = params;
+export default function ChatPage() {
+  const searchParams = useSearchParams();
+  const { chatId } = useParams() as { chatId: string };
   const [messages, setMessages] = useState<Message[]>([]);
   const [message, setMessage] = useState(''); // Renamed from input to message
   const [isRecording, setIsRecording] = useState(false);
@@ -116,14 +118,92 @@ export default function ChatPage({ params }: { params: { chatId: string } }) {
     };
   }, [isRecording]);
 
+  const handleSendMessage = async (messageContent: string) => {
+    if (!messageContent.trim()) return;
+
+    console.log("Sending message:", messageContent);
+    setIsLoading(true);
+
+    try {
+      // 1. Optimistic UI update
+      const userMessage: Message = { role: 'user', content: messageContent };
+      setMessages(prev => [...prev, userMessage, { role: 'assistant', content: '' }]);
+      setMessage(''); // Clear message input
+
+      // 2. Fetch the streaming response
+      const token = localStorage.getItem('jwt_token');
+      const response = await fetch(
+        `http://localhost:8080/api/chat/${chatId}/message`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': token ? `Bearer ${token}` : '',
+        },
+        body: JSON.stringify({
+          message: messageContent,
+          location: location // Send the location object
+        }),
+      });
+
+      if (!response.body) {
+        console.error("Response body is null");
+        return;
+      }
+      console.log("Received response body.");
+
+      // 3. Decode and process the stream
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) {
+          console.log("Stream finished.");
+          break;
+        }
+
+        buffer += decoder.decode(value, { stream: true });
+        const parts = buffer.split('\n');
+
+        for (let i = 0; i < parts.length - 1; i++) {
+          const part = parts[i];
+          if (part) {
+            try {
+              const json = JSON.parse(part);
+              if (json.response) {
+                setMessages(prev => {
+                  const lastMessage = prev[prev.length - 1];
+                  const updatedContent = lastMessage.content + json.response;
+                  const updatedLastMessage = { ...lastMessage, content: updatedContent };
+                  return [...prev.slice(0, -1), updatedLastMessage];
+                });
+              }
+            } catch (e) {
+              console.error("Error parsing stream part:", part, e);
+            }
+          }
+        }
+        buffer = parts[parts.length - 1];
+      }
+    } finally {
+      setIsLoading(false); // Reset loading state
+    }
+  };
+
   // MODIFIED: useEffect to fetch history and now also get 
   // location
   useEffect(() => {
     // Fetch initial chat history
     const fetchHistory = async () => {
       try {
-        const response = await axios.get(
-          `http://localhost:8080/api/chat/${chatId}`);
+
+        const token = localStorage.getItem('jwt_token');
+        const response = await axios.get(`http://localhost:8080/api/chat/${chatId}`, {
+          headers: {
+            'Authorization': token ? `Bearer ${token}` : '',
+          },
+        });
         setMessages(response.data);
       } catch (error) {
         console.error('Error fetching chat history:', error);
@@ -149,182 +229,6 @@ export default function ChatPage({ params }: { params: { chatId: string } }) {
     }
   }, [chatId]); // This effect runs once when the chat page
   // loads
-
-
-
-  const handleSendMessage = async (e: React.FormEvent) => {
-
-    e.preventDefault(); // Prevent default form submission
-
-    if (!message.trim()) return; // Use message state
-
-
-
-    console.log("Sending message:", message);
-
-    setIsLoading(true); // Set loading to true
-
-
-
-    try {
-
-      // 1. Optimistic UI update
-
-      const userMessage: Message = { role: 'user', content: message };
-
-      setMessages(prev => [...prev, userMessage, { role: 'assistant', content: '' }]);
-
-      setMessage(''); // Clear message input
-
-
-
-      // 2. Fetch the streaming response
-
-      // MODIFIED: The fetch request now includes the 
-
-      // location
-
-      const response = await fetch(
-
-        `http://localhost:8080/api/chat/${chatId}/messages`, {
-
-        method: 'POST',
-
-        headers: { 'Content-Type': 'application/json' },
-
-        body: JSON.stringify({
-
-          message: message,
-
-          location: location // Send the location object
-
-        }),
-
-      });
-
-
-
-      if (!response.body) {
-
-        console.error("Response body is null");
-
-        return;
-
-      }
-
-      console.log("Received response body.");
-
-
-
-      // 3. Decode and process the stream
-
-      const reader = response.body.getReader();
-
-      const decoder = new TextDecoder();
-
-      let buffer = '';
-
-
-
-      while (true) {
-
-        const { done, value } = await reader.read();
-
-        if (done) {
-
-          console.log("Stream finished.");
-
-          break;
-
-        }
-
-
-
-        console.log("Raw stream chunk (value):", value);
-
-        buffer += decoder.decode(value, { stream: true });
-
-        console.log("Decoded buffer after append:", buffer);
-
-
-
-        // The backend stream sends JSON objects separated by 
-
-        // newlines
-
-        const parts = buffer.split('\n');
-
-        console.log("Buffer split into parts:", parts);
-
-
-
-        // Process all complete JSON parts
-
-        for (let i = 0; i < parts.length - 1; i++) {
-
-          const part = parts[i];
-
-          if (part) {
-
-            console.log("Processing part:", part);
-
-            try {
-
-              const json = JSON.parse(part);
-
-              console.log("Parsed JSON:", json);
-
-              if (json.response) {
-
-                console.log("Appending response chunk:", json.response);
-
-                // Append the new chunk to the last message 
-
-                // (the assistant's)
-
-                setMessages(prev => {
-
-                  const lastMessage = prev[prev.length - 1];
-
-                  const updatedContent = lastMessage.content + json.response;
-
-                  const updatedLastMessage = { ...lastMessage, content: updatedContent };
-
-                  return [...prev.slice(0, -1), updatedLastMessage];
-
-                });
-
-              }
-
-            } catch (e) {
-
-              console.error("Error parsing stream part:", part, e);
-
-            }
-
-          }
-
-        }
-
-
-
-        // Keep the last, possibly incomplete, part in the 
-
-        // buffer
-
-        buffer = parts[parts.length - 1];
-
-        console.log("Remaining buffer:", buffer);
-
-      }
-
-    } finally {
-
-      setIsLoading(false); // Reset loading state
-
-    }
-
-  };
 
 
 
@@ -354,63 +258,63 @@ export default function ChatPage({ params }: { params: { chatId: string } }) {
 
               >
 
-                                {m.role === 'assistant' ? (
+                {m.role === 'assistant' ? (
 
-                                  <div className="flex flex-col">
+                  <div className="flex flex-col">
 
-                                    <MdxRenderer source={m.content} />
+                    <MdxRenderer source={m.content} />
 
-                                    {m.content && (
+                    {m.content && (
 
-                                                            <div className="flex justify-start mt-2 space-x-2">
+                      <div className="flex justify-start mt-2 space-x-2">
 
-                                                                                                                                                                                                                                      <Button
+                        <Button
 
-                                                                                                                                                                                                                                        variant="ghost"
+                          variant="ghost"
 
-                                                                                                                                                                                                                                        className="rounded-full h-8 w-8 bg-white/10 cursor-pointer"
+                          className="rounded-full h-8 w-8 bg-white/10 cursor-pointer"
 
-                                                                                                                                                                                                                                        onClick={() => handleReinforce(m.content)} title="Mark as important">
+                          onClick={() => handleReinforce(m.content)} title="Mark as important">
 
-                                                                                                                                                                                                                                        <StarIcon className="h-4 w-4" />
+                          <StarIcon className="h-4 w-4" />
 
-                                                                                                                                                                                                                                        <span className="sr-only">Mark as important</span>
+                          <span className="sr-only">Mark as important</span>
 
-                                                                                                                                                                                                                                      </Button>
-                                                                                                                                                                                                                                      {/* NEW: Add the Forget button */}
-                                                                                                                                                                                                                                      <Button
-                                                                                                                                                                                                                                        variant="ghost"
-                                                                                                                                                                                                                                        className="rounded-full h-8 w-8 bg-white/10 cursor-pointer"
-                                                                                                                                                                                                                                        onClick={() => handleForget(m.content)} title="Forget this memory">
-                                                                                                                                                                                                                                        <Trash2Icon className="h-4 w-4" />
-                                                                                                                                                                                                                                        <span className="sr-only">Forget this memory</span>
-                                                                                                                                                                                                                                      </Button>
+                        </Button>
+                        {/* NEW: Add the Forget button */}
+                        <Button
+                          variant="ghost"
+                          className="rounded-full h-8 w-8 bg-white/10 cursor-pointer"
+                          onClick={() => handleForget(m.content)} title="Forget this memory">
+                          <Trash2Icon className="h-4 w-4" />
+                          <span className="sr-only">Forget this memory</span>
+                        </Button>
 
-                                                                                                                                                                                                                                      <Button
+                        <Button
 
-                                                                                                                                                                                                                                        variant="ghost"
+                          variant="ghost"
 
-                                                                                                                                                                                                                                        className="rounded-full h-8 w-8 bg-white/10 cursor-pointer"
+                          className="rounded-full h-8 w-8 bg-white/10 cursor-pointer"
 
-                                                                                                                                                                                                                                        onClick={() => navigator.clipboard.writeText(m.content)} title="Copy message">
+                          onClick={() => navigator.clipboard.writeText(m.content)} title="Copy message">
 
-                                                                                                                                                                                                                                        <CopyIcon className="h-4 w-4" />
+                          <CopyIcon className="h-4 w-4" />
 
-                                                                                                                                                                                                                                        <span className="sr-only">Copy message</span>
+                          <span className="sr-only">Copy message</span>
 
-                                                                                                                                                                                                                                      </Button>
+                        </Button>
 
-                                                            </div>
+                      </div>
 
-                                    )}
+                    )}
 
-                                  </div>
+                  </div>
 
-                                ) : (
+                ) : (
 
-                                  <span>{m.content}</span>
+                  <span>{m.content}</span>
 
-                                )}
+                )}
 
               </div>
 
@@ -430,7 +334,10 @@ export default function ChatPage({ params }: { params: { chatId: string } }) {
 
         <form
 
-          onSubmit={handleSendMessage}
+          onSubmit={(e) => {
+            e.preventDefault();
+            handleSendMessage(message);
+          }}
 
           className={`w-1/2 rounded-2xl border-2 border-border bg-muted relative overflow-hidden transition-[min-height] duration-500 ease-in-out ${isRecording ? "min-h-[150px]" : "min-h-[80px]"
 
@@ -502,7 +409,7 @@ export default function ChatPage({ params }: { params: { chatId: string } }) {
 
                       e.preventDefault();
 
-                      handleSendMessage(e);
+                      handleSendMessage(message);
 
                     }
 
