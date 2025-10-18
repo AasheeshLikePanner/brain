@@ -40,7 +40,7 @@ class LLMService {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          model: 'qwen2.5:1.5b',
+          model: 'qwen3:1.7B',
           prompt,
           stream: false, // We want the full response at once
         }),
@@ -68,7 +68,7 @@ class LLMService {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          model: 'qwen2.5:1.5b',
+          model: 'qwen2.5:1.7b',
           prompt,
           stream: true,
         }),

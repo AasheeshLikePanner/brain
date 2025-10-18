@@ -36,52 +36,67 @@ class ChatService {
     // PHASE 1: PARALLEL DATA GATHERING (CRITICAL PATH)
     // ═══════════════════════════════════════════════════════════════
     const startTime = Date.now();
-    
-    // Don't await message save - let it happen in parallel
+    console.log(`[ChatService] Starting Phase 1 at ${startTime}ms`);
+
+    const saveMessageStart = Date.now();
     const saveMessagePromise = prisma.chatMessage.create({
       data: { chatId, role: 'user', content: message }
     }).catch(err => {
       console.error('[ChatService] Error saving user message:', err);
       throw err;
     });
+    console.log(`[ChatService] User message save initiated: ${Date.now() - saveMessageStart}ms`);
 
-    // Run ALL data gathering in parallel
+    const historyPromise = this.getChatHistory(chatId, userId);
+    const entitiesPromise = this.extractContextEntitiesQuick(message);
+    const searchMemoriesPromise = memoryIndexService.searchMemories(userId, message, 5, []);
+
     const [history, contextEntities, relevantMemories] = await Promise.all([
-      this.getChatHistory(chatId, userId),
-      this.extractContextEntitiesQuick(message), // NEW: Fast entity extraction
-      memoryIndexService.searchMemories(userId, message, 5, []), // Will enhance with entities later
+      historyPromise,
+      entitiesPromise,
+      searchMemoriesPromise,
       saveMessagePromise // Ensure save completes
     ]);
 
+    console.log(`[ChatService] getChatHistory took: ${Date.now() - saveMessageStart}ms`); // Re-using saveMessageStart for relative timing
+    console.log(`[ChatService] extractContextEntitiesQuick took: ${Date.now() - saveMessageStart}ms`);
+    console.log(`[ChatService] memoryIndexService.searchMemories took: ${Date.now() - saveMessageStart}ms`);
     console.log(`[ChatService] Phase 1 complete: ${Date.now() - startTime}ms`);
 
     // ═══════════════════════════════════════════════════════════════
     // PHASE 2: PARALLEL MEMORY FETCH + REASONING
     // ═══════════════════════════════════════════════════════════════
     const phase2Start = Date.now();
+    console.log(`[ChatService] Starting Phase 2 at ${phase2Start}ms`);
 
-    // Fetch memory details and run reasoning IN PARALLEL
+    const memoryDetailsPromise = prisma.memory.findMany({
+      where: { id: { in: relevantMemories.map(m => m.id) } },
+      select: {
+        id: true,
+        content: true,
+        type: true,
+        metadata: true,
+        recordedAt: true
+      }
+    });
+    const implicationsPromise = this.reasoningService.detectImplications(userId, relevantMemories, message);
+    const graphReasoningPromise = this.reasoningService.graphReasoning(userId, message);
+
     const [memoryDetails, implications, graphReasoning] = await Promise.all([
-      prisma.memory.findMany({
-        where: { id: { in: relevantMemories.map(m => m.id) } },
-        select: {
-          id: true,
-          content: true,
-          type: true,
-          metadata: true,
-          recordedAt: true
-        }
-      }),
-      // Run both reasoning calls in parallel - key optimization!
-      this.reasoningService.detectImplications(userId, relevantMemories, message),
-      this.reasoningService.graphReasoning(userId, message)
+      memoryDetailsPromise,
+      implicationsPromise,
+      graphReasoningPromise
     ]);
 
+    console.log(`[ChatService] prisma.memory.findMany took: ${Date.now() - phase2Start}ms`);
+    console.log(`[ChatService] reasoningService.detectImplications took: ${Date.now() - phase2Start}ms`);
+    console.log(`[ChatService] reasoningService.graphReasoning took: ${Date.now() - phase2Start}ms`);
     console.log(`[ChatService] Phase 2 complete: ${Date.now() - phase2Start}ms`);
 
     // ═══════════════════════════════════════════════════════════════
     // PHASE 3: PROMPT CONSTRUCTION (FAST)
     // ═══════════════════════════════════════════════════════════════
+    const promptConstructionStart = Date.now();
     const contextString = memoryDetails
       .map(mem => `[id: ${mem.id}] ${mem.content}`)
       .join('\n---\n');
@@ -141,12 +156,15 @@ User's Question: ${message}`;
 
     const prompt = `${systemPrompt}\n\n${userPrompt}`;
 
+    console.log(`[ChatService] Prompt construction took: ${Date.now() - promptConstructionStart}ms`);
     console.log(`[ChatService] Total time to first token: ${Date.now() - startTime}ms`);
 
     // ═══════════════════════════════════════════════════════════════
     // PHASE 4: STREAM RESPONSE
     // ═══════════════════════════════════════════════════════════════
+    const llmCallStart = Date.now();
     const llmStream = await llmService.generateCompletionStream(prompt);
+    console.log(`[ChatService] LLM generateCompletionStream initiated: ${Date.now() - llmCallStart}ms`);
     console.log('[ChatService] Streaming started');
 
     let fullResponse = '';
@@ -166,6 +184,7 @@ User's Question: ${message}`;
       
       async flush(controller) {
         console.log('[ChatService] Stream finished. Saving assistant message...');
+        const assistantMessageSaveStart = Date.now();
         
         await prisma.chatMessage.create({
           data: {
@@ -175,9 +194,10 @@ User's Question: ${message}`;
           },
         });
 
-        console.log(`[ChatService] Saved assistant response for chat ${chatId}`);
+        console.log(`[ChatService] Saved assistant response for chat ${chatId} in ${Date.now() - assistantMessageSaveStart}ms`);
 
         // Queue memory extraction - don't await
+        const memoryQueueAddStart = Date.now();
         memoryQueue.add('extract', { 
           userId, 
           chatId, 
@@ -185,7 +205,7 @@ User's Question: ${message}`;
           assistantMessage: fullResponse 
         }).catch(err => console.error('[ChatService] Queue error:', err));
         
-        console.log(`[ChatService] Memory extraction queued for chat ${chatId}`);
+        console.log(`[ChatService] Memory extraction queued for chat ${chatId} in ${Date.now() - memoryQueueAddStart}ms`);
       }
     });
 

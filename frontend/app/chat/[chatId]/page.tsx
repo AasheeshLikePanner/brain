@@ -1,7 +1,7 @@
 'use client';
 
 import { useSearchParams, useParams } from 'next/navigation';
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import axios from 'axios';
 import { Button } from "@/components/ui/button";
 import { Mic, ArrowUpIcon, MicOff, StarIcon, CopyIcon, Trash2Icon } from "lucide-react";
@@ -36,6 +36,8 @@ export default function ChatPage() {
   const [isRecording, setIsRecording] = useState(false);
   const [seconds, setSeconds] = useState(0);
   const [isLoading, setIsLoading] = useState(false);
+
+  const messagesEndRef = useRef<HTMLDivElement>(null);
 
   // NEW: State to store the user's location
   const [location, setLocation] = useState<Location | null>(null);
@@ -117,6 +119,13 @@ export default function ChatPage() {
       clearInterval(interval);
     };
   }, [isRecording]);
+
+  // NEW: useEffect to scroll to the bottom when messages change
+  useEffect(() => {
+    if (messagesEndRef.current) {
+      messagesEndRef.current.scrollIntoView({ behavior: 'smooth' });
+    }
+  }, [messages]);
 
   const handleSendMessage = async (messageContent: string) => {
     if (!messageContent.trim()) return;
@@ -240,7 +249,7 @@ export default function ChatPage() {
 
       {/* Main content area for messages */}
 
-      <div className="flex-1 overflow-y-auto relative flex flex-col items-center py-2 pb-[120px]">
+      <div ref={messagesEndRef} className="flex-1 overflow-y-auto relative flex flex-col items-center py-2 pb-[120px]">
 
         <div className="w-1/2 flex flex-col space-y-4">
 

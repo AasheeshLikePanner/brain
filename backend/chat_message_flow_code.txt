@@ -1,0 +1,1592 @@
+--- /home/aasheeesh/Documents/webdev/projects/brain/backend/src/queues/memory.queue.ts ---
+
+import { Queue, Worker, Job } from 'bullmq';
+import redis from './redis';
+import { memoryExtractorService } from 'services/memory-extractor.service';
+
+// Define the interface for the job data
+export interface MemoryExtractionJob {
+  userId: string;
+  chatId: string;
+  userMessage: string;
+  assistantMessage: string;
+}
+
+// Initialize the queue
+export const memoryQueue = new Queue<MemoryExtractionJob>('memory-extraction', {
+  connection: redis,
+  defaultJobOptions: {
+    attempts: 3,
+    backoff: { type: 'exponential', delay: 1000 },
+  },
+});
+
+// Implement the worker
+export const memoryWorker = new Worker<MemoryExtractionJob>(
+  'memory-extraction',
+  async (job: Job<MemoryExtractionJob>) => {
+    console.log(`[MemoryWorker] Processing job ${job.id}:`, job.data);
+    await memoryExtractorService.extractAndStore(job.data.userId, job.data.userMessage, job.data.assistantMessage, job.data.chatId);
+    console.log(`[MemoryWorker] Finished processing job ${job.id}.` );
+  },
+  { connection: redis }
+);
+
+memoryWorker.on('completed', (job) => {
+  console.log(`[MemoryWorker] Job ${job.id} completed successfully.`);
+});
+
+memoryWorker.on('failed', (job, err) => {
+  console.error(`[MemoryWorker] Job ${job?.id} failed with error:`, err);
+});
+
+console.log('[MemoryQueue] Memory extraction queue and worker initialized.');
+console.log('[MemoryWorker] Worker instance created and event listeners attached.');
+console.log('[MemoryWorker] Worker instance created and event listeners attached.');
+
+
+--- /home/aasheeesh/Documents/webdev/projects/brain/backend/src/services/chat.service.ts ---
+
+import prisma from '../db';
+import { llmService } from './llm.service';
+import { memoryService } from './memory.service';
+import { graphService } from './graph.service'; // NEW
+import { memoryIndexService } from './memory-index.service';
+import { Chat, ChatMessage } from '@prisma/client';
+import { memoryQueue } from '../queues/memory.queue';
+import { ReasoningService } from './reasoning.service';
+
+class ChatService {
+  private reasoningService: ReasoningService;
+
+  constructor() {
+    this.reasoningService = new ReasoningService();
+  }
+
+  async createChatSession(userId: string, title: string): Promise<Chat> {
+    const chat = await prisma.chat.create({
+      data: {
+        userId,
+        title: title.substring(0, 50),
+      }
+    });
+    return chat;
+  }
+
+  async streamChatResponse(
+    chatId: string,
+    userId: string,
+    message: string
+  ): Promise<ReadableStream<Uint8Array>> {
+    
+    console.log('[ChatService] Starting streamChatResponse - OPTIMIZED');
+    
+    // ═══════════════════════════════════════════════════════════════
+    // PHASE 1: PARALLEL DATA GATHERING (CRITICAL PATH)
+    // ═══════════════════════════════════════════════════════════════
+    const startTime = Date.now();
+    console.log(`[ChatService] Starting Phase 1 at ${startTime}ms`);
+
+    const saveMessageStart = Date.now();
+    const saveMessagePromise = prisma.chatMessage.create({
+      data: { chatId, role: 'user', content: message }
+    }).catch(err => {
+      console.error('[ChatService] Error saving user message:', err);
+      throw err;
+    });
+    console.log(`[ChatService] User message save initiated: ${Date.now() - saveMessageStart}ms`);
+
+    const historyPromise = this.getChatHistory(chatId, userId);
+    const entitiesPromise = this.extractContextEntitiesQuick(message);
+    const searchMemoriesPromise = memoryIndexService.searchMemories(userId, message, 5, []);
+
+    const [history, contextEntities, relevantMemories] = await Promise.all([
+      historyPromise,
+      entitiesPromise,
+      searchMemoriesPromise,
+      saveMessagePromise // Ensure save completes
+    ]);
+
+    console.log(`[ChatService] getChatHistory took: ${Date.now() - saveMessageStart}ms`); // Re-using saveMessageStart for relative timing
+    console.log(`[ChatService] extractContextEntitiesQuick took: ${Date.now() - saveMessageStart}ms`);
+    console.log(`[ChatService] memoryIndexService.searchMemories took: ${Date.now() - saveMessageStart}ms`);
+    console.log(`[ChatService] Phase 1 complete: ${Date.now() - startTime}ms`);
+
+    // ═══════════════════════════════════════════════════════════════
+    // PHASE 2: PARALLEL MEMORY FETCH + REASONING
+    // ═══════════════════════════════════════════════════════════════
+    const phase2Start = Date.now();
+    console.log(`[ChatService] Starting Phase 2 at ${phase2Start}ms`);
+
+    const memoryDetailsPromise = prisma.memory.findMany({
+      where: { id: { in: relevantMemories.map(m => m.id) } },
+      select: {
+        id: true,
+        content: true,
+        type: true,
+        metadata: true,
+        recordedAt: true
+      }
+    });
+    const implicationsPromise = this.reasoningService.detectImplications(userId, relevantMemories, message);
+    const graphReasoningPromise = this.reasoningService.graphReasoning(userId, message);
+
+    const [memoryDetails, implications, graphReasoning] = await Promise.all([
+      memoryDetailsPromise,
+      implicationsPromise,
+      graphReasoningPromise
+    ]);
+
+    console.log(`[ChatService] prisma.memory.findMany took: ${Date.now() - phase2Start}ms`);
+    console.log(`[ChatService] reasoningService.detectImplications took: ${Date.now() - phase2Start}ms`);
+    console.log(`[ChatService] reasoningService.graphReasoning took: ${Date.now() - phase2Start}ms`);
+    console.log(`[ChatService] Phase 2 complete: ${Date.now() - phase2Start}ms`);
+
+    // ═══════════════════════════════════════════════════════════════
+    // PHASE 3: PROMPT CONSTRUCTION (FAST)
+    // ═══════════════════════════════════════════════════════════════
+    const promptConstructionStart = Date.now();
+    const contextString = memoryDetails
+      .map(mem => `[id: ${mem.id}] ${mem.content}`)
+      .join('\n---\n');
+
+    let reasoningContext = '';
+    
+    if (implications.length > 0) {
+      reasoningContext += '\n\n**Relevant Insights:**\n';
+      implications.forEach((imp, i) => {
+        reasoningContext += `${i + 1}. ${imp.content}\n`;
+      });
+    }
+
+    if (graphReasoning.reasoning) {
+      reasoningContext += '\n\n**Graph Analysis:**\n';
+      reasoningContext += graphReasoning.reasoning + '\n';
+      
+      if (graphReasoning.relevantPaths.length > 0) {
+        reasoningContext += '\nRelevant connections:\n';
+        graphReasoning.relevantPaths.forEach(p => {
+          reasoningContext += `- ${p.explanation}\n`;
+        });
+      }
+    }
+
+    const currentDate = new Date().toUTCString();
+    const historyText = history.map(m => `${m.role}: ${m.content}`).join('\n');
+
+    const systemPrompt = `You are a helpful assistant with access to the user's personal knowledge base and reasoning capabilities.
+
+You have analyzed the context and identified some insights:${reasoningContext}
+
+When responding:
+1. Use the provided insights to give more helpful, proactive answers
+2. If implications suggest actions, offer them naturally
+3. If there are connections the user might not have considered, mention them
+4. Always cite sources using <Source id=\"...\" />
+
+Your answers must be formatted in MDX.
+When you mention a date, wrap it in <DateHighlight>component</DateHighlight>.
+When you reference a memory, wrap key insights in <MemoryHighlight>component</MemoryHighlight>.
+When you use information from memories, cite with <Source id=\"memory-id\" />.
+
+Current context:
+- Current Date/Time: ${currentDate}
+- User Location: [Location not provided]`;
+
+    const userPrompt = `Here is the relevant context, including memories from our past conversations, that you should use to answer the question:
+
+Relevant Memories:
+${contextString}
+
+Chat History:
+${historyText}
+
+User's Question: ${message}`;
+
+    const prompt = `${systemPrompt}\n\n${userPrompt}`;
+
+    console.log(`[ChatService] Prompt construction took: ${Date.now() - promptConstructionStart}ms`);
+    console.log(`[ChatService] Total time to first token: ${Date.now() - startTime}ms`);
+
+    // ═══════════════════════════════════════════════════════════════
+    // PHASE 4: STREAM RESPONSE
+    // ═══════════════════════════════════════════════════════════════
+    const llmCallStart = Date.now();
+    const llmStream = await llmService.generateCompletionStream(prompt);
+    console.log(`[ChatService] LLM generateCompletionStream initiated: ${Date.now() - llmCallStart}ms`);
+    console.log('[ChatService] Streaming started');
+
+    let fullResponse = '';
+    const transformStream = new TransformStream({
+      transform(chunk, controller) {
+        const text = new TextDecoder().decode(chunk);
+        try {
+          const json = JSON.parse(text);
+          if (json.response) {
+            fullResponse += json.response;
+          }
+        } catch (e) {
+          fullResponse += text;
+        }
+        controller.enqueue(chunk);
+      },
+      
+      async flush(controller) {
+        console.log('[ChatService] Stream finished. Saving assistant message...');
+        const assistantMessageSaveStart = Date.now();
+        
+        await prisma.chatMessage.create({
+          data: {
+            chatId,
+            role: 'assistant',
+            content: fullResponse,
+          },
+        });
+
+        console.log(`[ChatService] Saved assistant response for chat ${chatId} in ${Date.now() - assistantMessageSaveStart}ms`);
+
+        // Queue memory extraction - don't await
+        const memoryQueueAddStart = Date.now();
+        memoryQueue.add('extract', { 
+          userId, 
+          chatId, 
+          userMessage: message, 
+          assistantMessage: fullResponse 
+        }).catch(err => console.error('[ChatService] Queue error:', err));
+        
+        console.log(`[ChatService] Memory extraction queued for chat ${chatId} in ${Date.now() - memoryQueueAddStart}ms`);
+      }
+    });
+
+    return llmStream.pipeThrough(transformStream);
+  }
+
+  // ═══════════════════════════════════════════════════════════════
+  // HELPER METHODS
+  // ═══════════════════════════════════════════════════════════════
+
+  /**
+   * Quick entity extraction using regex (no DB, no LLM)
+   * Falls back to empty array if no entities found
+   */
+  private extractContextEntitiesQuick(message: string): string[] {
+    // Extract capitalized words/phrases
+    const matches = message.match(/\b[A-Z][a-z]+(?:\s[A-Z][a-z]+)*\b/g) || [];
+    
+    // Filter out common stop words
+    const stopWords = new Set([
+      'I', 'The', 'A', 'An', 'This', 'That', 'My', 'Your', 
+      'We', 'They', 'He', 'She', 'It', 'Could', 'Should', 'Would'
+    ]);
+    
+    const entities = matches.filter(w => !stopWords.has(w));
+    
+    // Return unique entities, limit to 5 most relevant
+    return [...new Set(entities)].slice(0, 5);
+  }
+
+  /**
+   * Get chat history with optimized query
+   */
+  public async getChatHistory(chatId: string, userId: string, limit: number = 10) {
+    return prisma.chatMessage.findMany({
+      where: {
+        chatId: chatId,
+        chat: { userId: userId } // Add userId filter for security
+      },
+      select: { 
+        role: true, 
+        content: true 
+      },
+      orderBy: { createdAt: 'asc' }, // Changed to asc for chronological order
+      take: limit
+    });
+  }
+
+  // ... other methods ...
+}
+
+export const chatService = new ChatService();
+
+
+--- /home/aasheeesh/Documents/webdev/projects/brain/backend/src/services/contradiction-detection.service.ts ---
+
+import prisma from '../db';
+import { llmService } from './llm.service';
+
+export class ContradictionDetectionService {
+
+  /**
+   * Check if a new memory contradicts existing memories
+   */
+  async detectContradictions(
+    userId: string,
+    newMemoryContent: string,
+    newMemoryId?: string
+  ): Promise<{
+    hasContradictions: boolean;
+    contradictions: Array<{
+      existingMemoryId: string;
+      existingContent: string;
+      reason: string;
+    }>;
+  }> {
+    // Get recent memories (last 90 days) that might contradict
+    const ninetyDaysAgo = new Date();
+    ninetyDaysAgo.setDate(ninetyDaysAgo.getDate() - 90);
+
+    const recentMemories = await prisma.memory.findMany({
+      where: {
+        userId,
+        deleted: false,
+        createdAt: { gte: ninetyDaysAgo },
+        ...(newMemoryId && { id: { not: newMemoryId } })
+      },
+      select: {
+        id: true,
+        content: true,
+        createdAt: true,
+        type: true
+      },
+      take: 50 // Limit to prevent too many LLM calls
+    });
+
+    if (recentMemories.length === 0) {
+      return { hasContradictions: false, contradictions: [] };
+    }
+
+    // Use LLM to detect contradictions
+    const prompt = `Analyze if the following NEW memory contradicts any EXISTING memories.
+
+NEW MEMORY:
+${newMemoryContent}
+
+EXISTING MEMORIES:
+${recentMemories.map((m, i) => `[${i}] ${m.content}`).join('\n')}
+
+Task: Identify if the NEW memory contradicts any EXISTING memories. A contradiction means they make conflicting claims about the same subject.
+
+Examples of contradictions:
+- "I prefer coffee" vs "I prefer tea" (about same preference)
+- "Sarah is an intern" vs "Sarah is a senior engineer" (about same person's role, though could be temporal progression)
+- "Meeting is on Monday" vs "Meeting is on Tuesday" (about same event)
+
+Examples of NOT contradictions:
+- "I had coffee today" vs "I prefer tea" (one is specific instance, other is general preference)
+- Different facts about different subjects
+- Complementary information
+
+Respond in JSON format:
+{
+  "contradictions": [
+    {
+      "existingMemoryIndex": <number>,
+      "reason": "<brief explanation>",
+      "severity": "<high|medium|low>",
+      "isTemporalProgression": <boolean>
+    }
+  ]
+}
+
+If no contradictions, return: {"contradictions": []}`;
+
+    try {
+      const response = await llmService.generateCompletion(prompt);
+      const parsed = JSON.parse(this.extractJSON(response));
+
+      const contradictions = parsed.contradictions.map((c: any) => ({
+        existingMemoryId: recentMemories[c.existingMemoryIndex].id,
+        existingContent: recentMemories[c.existingMemoryIndex].content,
+        reason: c.reason,
+        severity: c.severity,
+        isTemporalProgression: c.isTemporalProgression
+      }));
+
+      return {
+        hasContradictions: contradictions.length > 0,
+        contradictions
+      };
+    } catch (error) {
+      console.error('Error detecting contradictions:', error);
+      return { hasContradictions: false, contradictions: [] };
+    }
+  }
+
+  /**
+   * Resolve a contradiction by updating memory metadata
+   */
+  async resolveContradiction(
+    newMemoryId: string,
+    existingMemoryId: string,
+    resolution: 'temporal_update' | 'contradiction_noted' | 'merge'
+  ): Promise<void> {
+    if (resolution === 'temporal_update') {
+      // Mark old memory as superseded
+      const oldMemory = await prisma.memory.findUnique({ where: { id: existingMemoryId }, select: { metadata: true } });
+      await prisma.memory.update({
+        where: { id: existingMemoryId },
+        data: {
+          metadata: {
+            ...(oldMemory?.metadata as object || {}),
+            supersededBy: newMemoryId,
+            supersededAt: new Date().toISOString()
+          },
+          confidenceScore: 0.3 // Reduce confidence but don't delete
+        }
+      });
+
+      // Mark new memory as superseding
+      const newMemory = await prisma.memory.findUnique({ where: { id: newMemoryId }, select: { metadata: true } });
+      await prisma.memory.update({
+        where: { id: newMemoryId },
+        data: {
+          metadata: {
+            ...(newMemory?.metadata as object || {}),
+            supersedes: existingMemoryId
+          }
+        }
+      });
+    } else if (resolution === 'contradiction_noted') {
+      // Add metadata to both memories noting the contradiction
+      const existingMemory = await prisma.memory.findUnique({
+        where: { id: existingMemoryId },
+        select: { metadata: true }
+      });
+
+      const newMemory = await prisma.memory.findUnique({
+        where: { id: newMemoryId },
+        select: { metadata: true }
+      });
+
+      await prisma.memory.update({
+        where: { id: existingMemoryId },
+        data: {
+          metadata: {
+            ...(existingMemory?.metadata as object || {}),
+            contradictedBy: newMemoryId
+          }
+        }
+      });
+
+      await prisma.memory.update({
+        where: { id: newMemoryId },
+        data: {
+          metadata: {
+            ...(newMemory?.metadata as object || {}),
+            contradicts: existingMemoryId
+          }
+        }
+      });
+    }
+  }
+
+  private extractJSON(text: string): string {
+    const jsonMatch = text.match(/\{[\s\S]*\}/);
+    return jsonMatch ? jsonMatch[0] : '{"contradictions": []}';
+  }
+}
+
+
+--- /home/aasheeesh/Documents/webdev/projects/brain/backend/src/services/llm.service.ts ---
+
+class LLMService {
+  private ollamaUrl: string;
+
+  constructor() {
+    this.ollamaUrl = process.env.OLLAMA_URL || 'http://localhost:11434';
+  }
+
+  async createEmbedding(text: string): Promise<number[]> {
+    try {
+      console.log(`[LLMService] Creating embedding for text: "${text.substring(0, 50)}"...`);
+      const response = await fetch(`${this.ollamaUrl}/api/embeddings`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          model: 'nomic-embed-text',
+          prompt: text,
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error(`Ollama API request failed with status ${response.status}`);
+      }
+
+      const data = await response.json();
+      console.log('[LLMService] Successfully created embedding.');
+      return data.embedding;
+    } catch (error) {
+      console.error('Error creating embedding:', error);
+      throw error;
+    }
+  }
+  
+  async generateCompletion(prompt: string): Promise<string> {
+    try {
+      const response = await fetch(`${this.ollamaUrl}/api/generate`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          model: 'qwen3:1.7B',
+          prompt,
+          stream: false, // We want the full response at once
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error(`Ollama API request failed with status ${response.status}`);
+      }
+
+      const data = await response.json();
+      return data.response;
+    } catch (error) {
+      console.error('Error generating completion:', error);
+      throw error;
+    }
+  }
+
+  async generateCompletionStream(prompt: string): Promise<ReadableStream<Uint8Array>> {
+    console.log('[LLMService] Generating completion stream from Ollama.');
+    console.log(`[LLMService] Prompt: 
+---
+${prompt}
+---`);
+    try {
+      const response = await fetch(`${this.ollamaUrl}/api/generate`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          model: 'llama3.1:8b',
+          prompt,
+          stream: true,
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error(`Ollama API request failed with status ${response.status}`);
+      }
+
+      if (!response.body) {
+        throw new Error('Response body is null');
+      }
+
+      return response.body;
+    } catch (error) {
+      console.error('Error generating completion stream:', error);
+      throw error;
+    }
+  }
+}
+
+export const llmService = new LLMService();
+
+--- /home/aasheeesh/Documents/webdev/projects/brain/backend/src/services/memory-extractor.service.ts ---
+
+import { v4 as uuidv4 } from 'uuid';
+import prisma from '../db';
+import { llmService } from './llm.service';
+import { MemoryType } from '../models/memory';
+import { ContradictionDetectionService } from './contradiction-detection.service';
+import { memoryService } from './memory.service';
+
+interface ExtractedMemory {
+  type: MemoryType;
+  content: string;
+  importance: number;
+  source?: string;
+  chatId?: string;
+  temporal?: Date;
+  entities?: string[];
+}
+
+class MemoryExtractorService {
+  private contradictionService: ContradictionDetectionService;
+
+  constructor() {
+    this.contradictionService = new ContradictionDetectionService();
+  }
+
+  async extractAndStore(userId: string, userMessage: string, assistantMessage: string, chatId: string): Promise<void> {
+    console.log('[MemoryExtractorService] Extracting and storing memories...');
+    const combinedContent = `User: ${userMessage}\nAssistant: ${assistantMessage}`;
+
+    // 1. Quick Duplicate Check (Placeholder)
+    const isDuplicate = await this.quickDuplicateCheck(userId, combinedContent);
+    if (isDuplicate) {
+      console.log('[MemoryExtractorService] Duplicate content detected, skipping extraction.');
+      return;
+    }
+
+    // 2. LLM-based Extraction (Placeholder)
+    const extractedMemories: ExtractedMemory[] = await this.parseMemories(combinedContent);
+
+    // 3. Store Memories and Embeddings
+    for (const memoryData of extractedMemories) {
+      // Create the memory first
+      const memory = await memoryService.ingest(
+        userId,
+        memoryData.content,
+        memoryData.type,
+        memoryData.importance,
+        memoryData.source,
+        memoryData.temporal?.toISOString()
+      );
+
+      // Check for contradictions
+      const contradictionCheck = await this.contradictionService.detectContradictions(
+        userId,
+        memoryData.content,
+        memory.id
+      );
+
+      if (contradictionCheck.hasContradictions) {
+        console.log(`[Contradiction Detected] Memory ${memory.id} contradicts existing memories`);
+        
+        for (const contradiction of contradictionCheck.contradictions) {
+          // Determine if it's temporal progression or true contradiction
+          const isProgression = this.isTemporalProgression(
+            contradiction.existingContent,
+            memoryData.content
+          );
+
+          if (isProgression) {
+            await this.contradictionService.resolveContradiction(
+              memory.id,
+              contradiction.existingMemoryId,
+              'temporal_update'
+            );
+          } else {
+            await this.contradictionService.resolveContradiction(
+              memory.id,
+              contradiction.existingMemoryId,
+              'contradiction_noted'
+            );
+          }
+        }
+      }
+    }
+    console.log(`[MemoryExtractorService] Finished extracting and storing ${extractedMemories.length} memories.`);
+  }
+
+  private isTemporalProgression(oldContent: string, newContent: string): boolean {
+    // Simple heuristic: check for role/status changes
+    const progressionKeywords = ['was', 'used to', 'previously', 'now', 'became', 'promoted'];
+    return progressionKeywords.some(keyword => 
+      newContent.toLowerCase().includes(keyword) ||
+      oldContent.toLowerCase().includes(keyword)
+    );
+  }
+
+  private async quickDuplicateCheck(userId: string, content: string): Promise<boolean> {
+    console.log('[MemoryExtractorService] Performing quick duplicate check...');
+    const recentMemories = await prisma.memory.findMany({
+      where: {
+        userId: userId,
+        content: content, // Exact match for now
+        createdAt: {
+          gte: new Date(Date.now() - 1000 * 60 * 5), // Check for duplicates in the last 5 minutes
+        },
+      },
+      take: 1,
+    });
+    return recentMemories.length > 0;
+  }
+
+  private async parseMemories(content: string): Promise<ExtractedMemory[]> {
+    console.log('[MemoryExtractorService] Parsing memories with LLM...');
+    const prompt = `From the following conversation, extract distinct memories. Each memory should be a JSON object with the following fields:
+- type: (string, choose from: ${Object.values(MemoryType).join(', ')})
+- content: (string, the actual memory)
+- importance: (number, 0.0 to 1.0, how important is this memory?)
+- source: (string, e.g., 'chat', 'document', 'observation')
+- temporal: (string, ISO date string if a specific date/time is mentioned, otherwise omit)
+- entities: (array of strings, ALL named entities, especially people, mentioned in the memory)
+
+Additionally, if family relationships are mentioned (e.g., mother, father, brother, sister), extract them as separate memories with type 'relationship' and content describing the relationship (e.g., 'User is mother of Sarah').
+
+Return a JSON array of these memory objects. If no distinct memories are found, return an empty array.
+
+Conversation:
+${content}
+
+Memories (JSON array):`;
+
+    try {
+      const llmResponse = await llmService.generateCompletion(prompt);
+      console.log('[MemoryExtractorService] LLM Raw Response:', llmResponse);
+      if (llmResponse) {
+        const jsonMatch = llmResponse.match(/```json\s*([\s\S]*?)\s*```/);
+        let cleanedResponse = llmResponse;
+        if (jsonMatch && jsonMatch[1]) {
+          cleanedResponse = jsonMatch[1];
+        } else {
+          const directJsonMatch = llmResponse.match(/\s*\[[\s\S]*\]\s*/);
+          if (directJsonMatch && directJsonMatch[0]) {
+            cleanedResponse = directJsonMatch[0];
+          }
+        }
+        const parsedMemories: ExtractedMemory[] = JSON.parse(cleanedResponse);
+        const filteredMemories = parsedMemories.filter(mem => {
+          const lowerContent = mem.content.toLowerCase();
+          return !lowerContent.includes("i don't remember") &&
+                 !lowerContent.includes("i do not remember") &&
+                 !lowerContent.includes("i don't have enough context");
+        });
+        return filteredMemories.map(mem => ({
+          ...mem,
+          temporal: mem.temporal ? new Date(mem.temporal) : undefined,
+        }));
+      }
+    } catch (e) {
+      console.error('[MemoryExtractorService] Failed to parse LLM response for memories:', e);
+    }
+    return [];
+  }
+}
+
+export const memoryExtractorService = new MemoryExtractorService();
+
+
+--- /home/aasheeesh/Documents/webdev/projects/brain/backend/src/services/memory-index.service.ts ---
+
+import prisma from '../db';
+import { llmService } from './llm.service';
+import { Memory } from '@prisma/client';
+
+interface SearchResult {
+  id: string;
+  content: string;
+  similarity: number;
+  rerankScore?: number;
+  breakdown?: any;
+}
+
+interface ScoredMemory {
+  id: string;
+  content: string;
+  score: number;
+  breakdown?: {
+    vectorSimilarity: number;
+    recency: number;
+    accessFrequency: number;
+    importance: number;
+    confidence: number;
+  };
+}
+
+class MemoryIndexService {
+  // This service will handle the hybrid search (FTS + Vector) and potentially reranking
+
+  async buildIndex(userId: string): Promise<void> {
+    // In this architecture, the indexes are managed by PostgreSQL directly via migrations.
+    // This method can be used for any future in-application indexing or verification if needed.
+    console.log(`[MemoryIndexService] Ensuring indexes are built for user ${userId}. (Managed by migrations)`);
+    // For now, this is a placeholder as actual index creation is via Prisma migrations.
+  }
+
+  /**
+ * Calculate a composite score for a memory based on multiple factors
+ */
+  private calculateMemoryScore(
+    memory: {
+      id: string;
+      content: string;
+      createdAt: Date;
+      accessCount: number;
+      lastAccessedAt: Date;
+      metadata: any;
+      confidenceScore: number;
+    },
+    vectorSimilarity: number,
+    maxAccessCount: number,
+    contextEntities?: string[]
+  ): { score: number; breakdown: any } {
+
+    const now = new Date();
+
+    // 1. RECENCY WEIGHT (exponential decay)
+    const daysOld = (now.getTime() - memory.createdAt.getTime()) / (1000 * 60 * 60 * 24);
+    const recencyDecayRate = 0.05; // Tunable parameter
+    const recencyWeight = Math.exp(-recencyDecayRate * daysOld);
+
+    // 2. ACCESS FREQUENCY WEIGHT
+    const accessBase = maxAccessCount > 0
+      ? Math.log(1 + memory.accessCount) / Math.log(1 + maxAccessCount)
+      : 0;
+
+    const daysSinceLastAccess = (now.getTime() - memory.lastAccessedAt.getTime()) / (1000 * 60 * 60 * 24);
+    const accessRecency = Math.exp(-recencyDecayRate * daysSinceLastAccess);
+    const accessFrequencyWeight = accessBase * accessRecency;
+
+    // 3. IMPORTANCE WEIGHT (from metadata)
+    const importance = memory.metadata?.importance || 0.5;
+
+    // 4. CONFIDENCE WEIGHT (for forgetting mechanism)
+    const confidence = memory.confidenceScore;
+
+    // 5. CONTEXTUAL BOOST (if entities are provided)
+    let contextualBoost = 0;
+    if (contextEntities && contextEntities.length > 0) {
+      const memoryEntities = memory.metadata?.detected_entities || [];
+      const overlap = contextEntities.filter(e =>
+        memoryEntities.some((me: string) =>
+          me.toLowerCase().includes(e.toLowerCase())
+        )
+      ).length;
+      contextualBoost = overlap / Math.max(contextEntities.length, 1);
+    }
+
+    // COMPOSITE SCORE with configurable weights
+    const weights = {
+      vector: 0.35,
+      recency: 0.20,
+      accessFreq: 0.15,
+      importance: 0.15,
+      confidence: 0.10,
+      contextual: 0.05
+    };
+
+    const finalScore =
+      (vectorSimilarity * weights.vector) +
+      (recencyWeight * weights.recency) +
+      (accessFrequencyWeight * weights.accessFreq) +
+      (importance * weights.importance) +
+      (confidence * weights.confidence) +
+      (contextualBoost * weights.contextual);
+
+    return {
+      score: finalScore,
+      breakdown: {
+        vectorSimilarity,
+        recency: recencyWeight,
+        accessFrequency: accessFrequencyWeight,
+        importance,
+        confidence,
+        contextualBoost
+      }
+    };
+  }
+
+  async vectorSearch(
+    userId: string,
+    queryEmbedding: number[],
+    limit: number = 10,
+    contextEntities?: string[]
+  ): Promise<ScoredMemory[]> {
+    const vectorString = `[${queryEmbedding.join(',')}]`;
+
+    // Get MORE results than needed because we'll re-score
+    const fetchLimit = limit * 3;
+
+    // Fetch memories with all necessary fields for scoring
+    const rawResults: any[] = await prisma.$queryRaw`
+    SELECT 
+      m.id,
+      m.content,
+      m."createdAt",
+      m."accessCount",
+      m."lastAccessedAt",
+      m.metadata,
+      m."confidenceScore",
+      (1 - (e.embedding <=> ${vectorString}::vector)) as similarity
+    FROM memories m
+    JOIN embeddings e ON m.id = e."memoryId"
+    WHERE 
+      m."userId" = ${userId}
+      AND m.deleted = false
+      AND m."confidenceScore" > 0.2
+    ORDER BY similarity DESC
+    LIMIT ${fetchLimit}
+  `;
+
+    // Get max access count for normalization
+    const maxAccessCount = Math.max(...rawResults.map(r => r.accessCount), 1);
+
+    // Score each memory using our composite scoring
+    const scoredResults = rawResults.map(r => {
+      const { score, breakdown } = this.calculateMemoryScore(
+        {
+          id: r.id,
+          content: r.content,
+          createdAt: r.createdAt,
+          accessCount: r.accessCount,
+          lastAccessedAt: r.lastAccessedAt,
+          metadata: r.metadata,
+          confidenceScore: r.confidenceScore
+        },
+        r.similarity,
+        maxAccessCount,
+        contextEntities
+      );
+
+      return {
+        id: r.id,
+        content: r.content,
+        score,
+        breakdown
+      };
+    });
+
+    // Sort by final score and take top results
+    scoredResults.sort((a, b) => b.score - a.score);
+
+    return scoredResults.slice(0, limit);
+  }
+
+  async fullTextSearch(userId: string, query: string, limit: number = 5): Promise<SearchResult[]> {
+    // Perform full-text search using PostgreSQL FTS
+    const rawResults: { id: string; content: string; rank: number; metadata: any }[] = await prisma.$queryRaw`
+      SELECT
+        id,
+        content,
+        ts_rank_cd(to_tsvector('english', content), websearch_to_tsquery('english', ${query})) as rank,
+        metadata
+      FROM memories
+      WHERE
+        "userId" = ${userId}
+        AND deleted = false
+        AND to_tsvector('english', content) @@ websearch_to_tsquery('english', ${query})
+      ORDER BY rank DESC
+      LIMIT ${limit}
+    `;
+
+    return rawResults.map(r => ({
+      id: r.id,
+      content: r.content,
+      similarity: r.rank, // Using rank as similarity for FTS results
+    }));
+  }
+
+  async searchMemories(
+    userId: string,
+    query: string,
+    limit: number = 5,
+    contextEntities?: string[]
+  ): Promise<SearchResult[]> {
+    // Generate query embedding
+    const queryEmbedding = await llmService.createEmbedding(query);
+
+    // Perform vector search with smart scoring
+    const vectorResults = await this.vectorSearch(
+      userId,
+      queryEmbedding,
+      limit,
+      contextEntities
+    );
+
+    // Perform full-text search
+    const ftsResults = await this.fullTextSearch(userId, query, limit);
+
+    // Combine and deduplicate
+    const combined = new Map<string, any>();
+
+    vectorResults.forEach(r => {
+      combined.set(r.id, {
+        id: r.id,
+        content: r.content,
+        similarity: r.score,
+        breakdown: r.breakdown
+      });
+    });
+
+    ftsResults.forEach(r => {
+      if (combined.has(r.id)) {
+        // Boost score if found in both
+        const existing = combined.get(r.id);
+        existing.similarity = existing.similarity * 0.7 + r.similarity * 0.3;
+      } else {
+        combined.set(r.id, r);
+      }
+    });
+
+    const results = Array.from(combined.values())
+      .sort((a, b) => b.similarity - a.similarity)
+      .slice(0, limit);
+
+    // IMPORTANT: Track that these memories were accessed
+    const memoryIds = results.map(r => r.id);
+    if (memoryIds.length > 0) {
+      await this.trackMemoryAccess(memoryIds);
+    }
+
+    return results;
+  }
+
+  /**
+ * Track that memories were accessed (for access frequency scoring)
+ */
+  private async trackMemoryAccess(memoryIds: string[]): Promise<void> {
+    try {
+      await prisma.$executeRaw`
+      UPDATE memories
+      SET 
+        "accessCount" = "accessCount" + 1,
+        "lastAccessedAt" = NOW()
+      WHERE id = ANY(CAST(${memoryIds} AS text[]))
+    `;
+    } catch (error) {
+      console.error('Error tracking memory access:', error);
+    }
+  }
+}
+
+export const memoryIndexService = new MemoryIndexService();
+
+
+--- /home/aasheeesh/Documents/webdev/projects/brain/backend/src/services/memory.service.ts ---
+
+import prisma from '../db';
+import { llmService } from './llm.service';
+import { v4 as uuidv4 } from 'uuid';
+import { pipeline, env } from '@xenova/transformers';
+import { Prisma } from '@prisma/client';
+import { MemoryAssociationService } from './memory-association.service';
+import { memoryIndexService } from './memory-index.service';
+
+// Set the cache directory for transformers.js
+env.cacheDir = './.transformers-cache';
+
+class MemoryService {
+  private reranker: any; // To store the loaded reranker pipeline
+  private associationService: MemoryAssociationService;
+
+  constructor() {
+    this.initReranker();
+    this.associationService = new MemoryAssociationService();
+  }
+
+  private async initReranker() {
+    try {
+      // Load the reranker model only once
+      this.reranker = await pipeline('text-classification', 'Xenova/bge-reranker-base', { quantized: true });
+      console.log('BGE Reranker model loaded successfully.');
+    } catch (error) {
+      console.error('Failed to load BGE Reranker model:', error);
+    }
+  }
+
+  async ingest(
+    userId: string,
+    content: string,
+    type: string = 'note',
+    importance: number = 0.5,
+    source: string = 'unknown',
+    recordedAt: string | null = null // Changed from temporal to recordedAt
+  ) {
+    try {
+      console.log('[MemoryService] Ingesting new memory...');
+      const newMemory = await prisma.memory.create({
+        data: {
+          userId,
+          content,
+          type,
+          recordedAt: recordedAt ? new Date(recordedAt) : null, // Use recordedAt field
+          metadata: {
+            importance,
+            source,
+          },
+        },
+      });
+      console.log(`[MemoryService] Memory ${newMemory.id} created. Generating embedding...`);
+
+      const embeddingVector = await llmService.createEmbedding(content);
+      console.log('[MemoryService] Embedding generated.');
+
+      if (!embeddingVector) {
+        throw new Error('Failed to generate embedding for the memory.');
+      }
+
+      const embeddingId = uuidv4();
+      const vectorString = `[${embeddingVector.join(',')}]`;
+      console.log('[MemoryService] Inserting embedding into database...');
+      await prisma.$executeRaw`
+        INSERT INTO "embeddings" ("id", "memoryId", "modelName", "embedding")
+        VALUES (${embeddingId}::uuid, ${newMemory.id}::uuid, 'nomic-embed-text', ${vectorString}::vector)
+      `;
+      console.log('[MemoryService] Embedding inserted.');
+
+      console.log(`Successfully ingested and embedded memory ${newMemory.id}`);
+      return newMemory;
+
+    } catch (error) {
+      console.error('Error during memory ingestion:', error);
+      throw error;
+    }
+  }
+
+  async reinforce(memoryId: string) {
+    console.log(`[MemoryService] Reinforcing memory: ${memoryId}`);
+    const memory = await prisma.memory.findUnique({
+      where: { id: memoryId },
+    });
+
+    if (!memory) {
+      throw new Error('Memory not found');
+    }
+
+    const currentMetadata = (memory.metadata || {}) as Prisma.JsonObject;
+    const currentImportance = (currentMetadata.importance as number) || 0.5;
+
+    // Increase importance by 0.1, capping at 1.0
+    const newImportance = Math.min(currentImportance + 0.1, 1.0);
+
+    const updatedMemory = await prisma.memory.update({
+      where: { id: memoryId },
+      data: {
+        metadata: {
+          ...currentMetadata,
+          importance: newImportance,
+        },
+      },
+    });
+
+    console.log(`[MemoryService] New importance for ${memoryId}: ${newImportance}`);
+    return updatedMemory;
+  }
+
+  async softDelete(memoryId: string) {
+    console.log(`[MemoryService] Soft deleting memory: ${memoryId}`);
+    const memory = await prisma.memory.findUnique({
+      where: { id: memoryId },
+    });
+
+    if (!memory) {
+      throw new Error('Memory not found');
+    }
+
+    const updatedMemory = await prisma.memory.update({
+      where: { id: memoryId },
+      data: {
+        deleted: true,
+      },
+    });
+
+    console.log(`[MemoryService] Successfully deleted memory ${memoryId}`);
+    return updatedMemory;
+  }
+
+  async getContext(
+    userId: string,
+    query: string,
+    limit: number = 3
+  ): Promise<{ contextString: string; sources: { id: string; content: string }[] }> {
+    // ... existing broad query detection ...
+
+    // Get top memories with smart scoring
+    let memories = await memoryIndexService.searchMemories(
+      userId,
+      query,
+      limit * 2  // Get more initially
+    );
+
+    // For each top memory, get associated memories (constellation effect)
+    const memoryConstellation: any[] = [];
+    const seenIds = new Set<string>();
+
+    for (const memory of memories.slice(0, limit)) {
+      if (seenIds.has(memory.id)) continue;
+      
+      const withAssociations = await this.associationService.getMemoryWithAssociations(memory.id);
+      
+      memoryConstellation.push(withAssociations.primary);
+      seenIds.add(memory.id);
+
+      // Add top 2 associated memories
+      for (const assoc of withAssociations.associated.slice(0, 2)) {
+        if (!seenIds.has(assoc.id)) {
+          memoryConstellation.push(assoc);
+          seenIds.add(assoc.id);
+        }
+      }
+    }
+
+    // ... existing reranking logic ...
+
+    // Format context with associations clearly marked
+    const contextString = memoryConstellation
+      .slice(0, limit + 2) // Allow a few extra from associations
+      .map((m, i) => {
+        const isAssociated = !memories.find(mem => mem.id === m.id);
+        const prefix = isAssociated ? '(Related)' : '';
+        return `${prefix}[${i + 1}] ${m.content}`;
+      })
+      .join('\n');
+    
+    const sources = memoryConstellation.slice(0, limit + 2).map(m => ({ id: m.id, content: m.content }));
+
+    return { contextString, sources };
+  }
+
+  async retrieve(userId: string, query: string): Promise<string> {
+    try {
+      const { contextString } = await this.getContext(userId, query);
+
+      if (contextString === "No relevant memories found.") {
+        return "I don't have any memories related to that.";
+      }
+
+      const prompt = `Based on the following memories, please answer the user's question.\n\nMemories:\n${contextString}\n\nUser's Question: ${query}`;
+
+      const finalResponse = await llmService.generateCompletion(prompt);
+
+      return finalResponse;
+
+    } catch (error) {
+      console.error('Error during memory retrieval:', error);
+      throw error;
+    }
+  }
+}
+
+export const memoryService = new MemoryService();
+
+
+--- /home/aasheeesh/Documents/webdev/projects/brain/backend/src/services/reasoning.service.ts ---
+
+import prisma from '../db';
+import { llmService } from './llm.service';
+import { graphService } from './graph.service';
+
+interface Implication {
+  type: 'action_suggestion' | 'connection' | 'gap';
+  content: string;
+  relatedMemories: string[];
+  confidence: number;
+}
+
+export class ReasoningService {
+
+  /**
+   * Detect implications from a set of memories
+   * Example: If "John wants AI updates" and "Sarah is AI lead" → suggest coordination
+   */
+  async detectImplications(
+    userId: string,
+    contextMemories: any[],
+    currentQuery: string
+  ): Promise<Implication[]> {
+    if (contextMemories.length < 2) {
+      return []; // Need multiple memories to find implications
+    }
+
+    // Format memories for LLM
+    const memoriesText = contextMemories
+      .map((m, i) => `[${i}] ${m.content}`)
+      .join('\n');
+
+    const prompt = `Given the following memories about a user and their current query, identify logical implications, connections, or action suggestions.
+
+USER'S MEMORIES:
+${memoriesText}
+
+CURRENT QUERY: "${currentQuery}"
+
+Task: Analyze these memories and identify:
+1. ACTION SUGGESTIONS: If the memories imply an action the user might need to take
+2. CONNECTIONS: If memories are related in ways that provide useful insight
+3. GAPS: If memories reference something important but lack crucial details
+
+Examples:
+- If one memory says "John wants weekly AI updates" and another says "Sarah is lead AI engineer", suggest: "You might want to coordinate with Sarah for John's update"
+- If multiple memories mention "Project Titan" but none explain what it is, identify this gap
+- If user asks about deadlines and memories show related commitments, connect them
+
+Respond in JSON format:
+{
+  "implications": [
+    {
+      "type": "action_suggestion" | "connection" | "gap",
+      "content": "<the implication or suggestion>",
+      "relatedMemoryIndices": [<indices of relevant memories>],
+      "confidence": <0.0-1.0>,
+      "reasoning": "<brief explanation of why this implication exists>"
+    }
+  ]
+}
+
+Only include high-confidence (>0.6) implications that are genuinely useful.`;
+
+    try {
+      const response = await llmService.generateCompletion(prompt);
+      const parsed = JSON.parse(this.extractJSON(response));
+
+      const implications: Implication[] = parsed.implications
+        .filter((imp: any) => imp.confidence > 0.6)
+        .map((imp: any) => ({
+          type: imp.type,
+          content: imp.content,
+          relatedMemories: imp.relatedMemoryIndices.map((idx: number) => contextMemories[idx].id),
+          confidence: imp.confidence
+        }));
+
+      return implications;
+    } catch (error) {
+      console.error('Error detecting implications:', error);
+      return [];
+    }
+  }
+
+  /**
+   * Identify knowledge gaps - things mentioned repeatedly but never explained
+   */
+  async identifyKnowledgeGaps(userId: string): Promise<Array<{ 
+    entity: string;
+    mentionCount: number;
+    hasDefinition: boolean;
+    suggestion: string;
+  }>> {
+    // Get all memories mentioning this entity
+    const memories = await prisma.memory.findMany({
+      where: {
+        userId,
+        deleted: false,
+        confidenceScore: { gt: 0.3 }
+      },
+      select: {
+        id: true,
+        content: true,
+        metadata: true
+      }
+    });
+
+    // Count entity mentions
+    const entityMentions = new Map<string, number>();
+    const entityDefinitions = new Set<string>();
+
+    for (const memory of memories) {
+      const entities = (memory.metadata as any)?.detected_entities || [];
+      
+      for (const entity of entities) {
+        entityMentions.set(entity, (entityMentions.get(entity) || 0) + 1);
+        
+        // Check if this memory defines the entity
+        const defPatterns = [
+          `${entity} is`,
+          `${entity} was`,
+          `${entity}:`,
+          `what is ${entity}`,
+          `${entity} refers to`
+        ];
+        
+        if (defPatterns.some(pattern => 
+          memory.content.toLowerCase().includes(pattern.toLowerCase())
+        )) {
+          entityDefinitions.add(entity);
+        }
+      }
+    }
+
+    // Find entities mentioned multiple times but never defined
+    const gaps: Array<{ 
+      entity: string;
+      mentionCount: number;
+      hasDefinition: boolean;
+      suggestion: string;
+    }> = [];
+
+    for (const [entity, count] of entityMentions.entries()) {
+      if (count >= 3 && !entityDefinitions.has(entity)) {
+        gaps.push({
+          entity,
+          mentionCount: count,
+          hasDefinition: false,
+          suggestion: `You've mentioned "${entity}" ${count} times but I don't have details about what it is. Would you like to tell me more?`
+        });
+      }
+    }
+
+    return gaps.sort((a, b) => b.mentionCount - a.mentionCount).slice(0, 5);
+  }
+
+  /**
+   * Build a timeline for an entity or topic
+   */
+  async buildTimeline(
+    userId: string,
+    entityName: string
+  ): Promise<{ 
+    entity: string;
+    timeline: Array<{ 
+      date: Date;
+      event: string;
+      memoryId: string;
+      type: string;
+    }>;
+    narrative: string;
+  }> {
+    // Get all memories mentioning this entity
+    const memories = await prisma.memory.findMany({
+      where: {
+        userId,
+        deleted: false,
+        content: {
+          contains: entityName,
+          mode: 'insensitive'
+        }
+      },
+      orderBy: { 
+        recordedAt: 'asc'
+      },
+      select: {
+        id: true,
+        content: true,
+        recordedAt: true,
+        createdAt: true,
+        type: true
+      }
+    });
+
+    if (memories.length === 0) {
+      return {
+        entity: entityName,
+        timeline: [],
+        narrative: `No memories found about ${entityName}.`
+      };
+    }
+
+    // Build timeline events
+    const timeline = memories.map(m => ({
+      date: m.recordedAt || m.createdAt,
+      event: m.content,
+      memoryId: m.id,
+      type: m.type || 'unknown'
+    }));
+
+    // Generate narrative using LLM
+    const timelineText = timeline
+      .map(t => `[${t.date.toLocaleDateString()}] ${t.event}`)
+      .join('\n');
+
+    const prompt = `Given the following chronological events about "${entityName}", create a coherent narrative summary that tells the story of this entity over time.\n\nTIMELINE:\n${timelineText}\n\nCreate a narrative that:\n- Identifies key developments and changes over time\n- Notes relationships and connections that formed\n- Highlights the current state\n- Uses past tense for historical events, present tense for current state\n\nKeep it concise (3-5 sentences) but informative.\n\nNarrative:`;
+
+    try {
+      const narrative = await llmService.generateCompletion(prompt);
+      
+      return {
+        entity: entityName,
+        timeline,
+        narrative: narrative.trim()
+      };
+    } catch (error) {
+      console.error('Error building timeline narrative:', error);
+      return {
+        entity: entityName,
+        timeline,
+        narrative: `Timeline of ${timeline.length} events related to ${entityName}.`
+      };
+    }
+  }
+
+  /**
+   * Perform graph-based reasoning
+   * Example: "Who can help me with X?" → traverse graph to find connected experts
+   */
+  async graphReasoning(
+    userId: string,
+    query: string
+  ): Promise<{ 
+    reasoning: string;
+    relevantPaths: Array<{ 
+      path: string[];
+      explanation: string;
+    }>;
+  }> {
+    // Detect if query is asking for connections
+    const connectionPatterns = [
+      /who (can|could|should|might) help/i,
+      /who knows about/i,
+      /who is connected to/i,
+      /relationship between/i,
+      /how is .* related to/i
+    ];
+
+    const isConnectionQuery = connectionPatterns.some(pattern => pattern.test(query));
+
+    if (!isConnectionQuery) {
+      return { reasoning: '', relevantPaths: [] };
+    }
+
+    // Extract entities from query
+    const entities = await prisma.entity.findMany({
+      where: { userId },
+      select: { id: true, name: true, type: true }
+    });
+
+    const mentionedEntities = entities.filter(e =>
+      query.toLowerCase().includes(e.name.toLowerCase())
+    );
+
+    if (mentionedEntities.length === 0) {
+      return { reasoning: '', relevantPaths: [] };
+    }
+
+    // For each mentioned entity, get their relationships
+    const paths: Array<{ path: string[]; explanation: string }> = [];
+
+    for (const entity of mentionedEntities) {
+      const relationships = await graphService.getRelationships(userId, entity.id);
+
+      for (const rel of relationships) {
+        const subject = rel.subjectEntity.name;
+        const object = rel.objectEntity?.name || '';
+        const predicate = rel.role || '';
+        const path = [subject, predicate, object];
+        const explanation = `${subject} ${predicate} ${object}`;
+        paths.push({ path, explanation });
+
+        // Look for second-degree connections
+        const connectedEntity = entities.find(e => 
+          e.name === object || e.name === subject
+        );
+
+        if (connectedEntity && connectedEntity.id !== entity.id) {
+          const secondDegree = await graphService.getRelationships(
+            userId, 
+            connectedEntity.id
+          );
+
+          for (const rel2 of secondDegree.slice(0, 3)) {
+            const extendedPath = [...path, rel2.role || '', rel2.objectEntity?.name || ''];
+            paths.push({
+              path: extendedPath,
+              explanation: `${explanation}, and ${rel2.subjectEntity.name} ${rel2.role} ${rel2.objectEntity?.name || ''}`
+            });
+          }
+        }
+      }
+    }
+
+    // Generate reasoning about these paths
+    const pathsText = paths
+      .slice(0, 10)
+      .map(p => p.explanation)
+      .join('\n');
+
+    const prompt = `Based on these relationship paths from the user's knowledge graph, provide insight for their query.\n\nQUERY: "${query}"\n\nRELATIONSHIP PATHS:\n${pathsText}\n\nProvide a brief (2-3 sentences) answer that uses these relationships to address the query.\n\nAnswer:`;
+
+    try {
+      const reasoning = await llmService.generateCompletion(prompt);
+      
+      return {
+        reasoning: reasoning.trim(),
+        relevantPaths: paths.slice(0, 5)
+      };
+    } catch (error) {
+      console.error('Error in graph reasoning:', error);
+      return { reasoning: '', relevantPaths: paths.slice(0, 5) };
+    }
+  }
+
+  private extractJSON(text: string): string {
+    const jsonMatch = text.match(/\{[\s\S]*\}/);
+    return jsonMatch ? jsonMatch[0] : '{"implications": []}';
+  }
+}
+
+export const reasoningService = new ReasoningService();

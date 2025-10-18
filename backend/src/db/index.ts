@@ -14,9 +14,7 @@ const prisma = new PrismaClient({
   },
 });
 
-prisma.$on('query', (e) => {
-  console.log('[Prisma Query]', e.query, e.params, e.duration, 'ms');
-});
+
 console.log('[Prisma] PrismaClient instantiated.');
 
 async function connectPrisma() {
