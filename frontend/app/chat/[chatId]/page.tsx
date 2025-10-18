@@ -123,11 +123,10 @@ export default function ChatPage() {
 
     console.log("Sending message:", messageContent);
     setIsLoading(true);
-    console.log('User message sent:', userMessage);
-
     try {
       // 1. Optimistic UI update
       const userMessage: Message = { role: 'user', content: messageContent };
+      console.log('User message sent:', userMessage);
       setMessages(prev => [...prev, userMessage, { role: 'assistant', content: '' }]);
       setMessage(''); // Clear message input
 

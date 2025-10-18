@@ -38,7 +38,9 @@ export const MdxRenderer = ({ source }: MdxRendererProps) => {
     if (source) {
       const serializeMdx = async () => {
         const cleanedSource = source
-          .replace(/<MemoryHighlight>component>/g, '<MemoryHighlight />');
+          .replace(/<MemoryHighlight>component>\n([\s\S]*?)\n<Source id="(.*?)"\/>/gs, (match, content, sourceId) => {
+            return `<MemoryHighlight content={${JSON.stringify(content)}} sourceId="${sourceId}" />`;
+          });
         const result = await serialize(cleanedSource, { scope: {}, mdxOptions: {} });
         setSerializedSource(result);
       };
