@@ -16,6 +16,7 @@ import { useAuth } from "@/lib/authContext"; // Re-import useAuth
 
 export function LoginDialog() {
   const { isAuthenticated, login, logout, isLoading, user } = useAuth();
+  console.log('LoginDialog state:', { isAuthenticated, isLoading, user });
 
   if (isLoading) {
     return null;
@@ -26,8 +27,8 @@ export function LoginDialog() {
       {isAuthenticated && (
         <div className="flex items-center">
           <Button className="rounded-full p-2 flex items-center justify-center bg-button-light ring-1 ring-border text-foreground hover-warm-gradient hover:scale-105 transition-transform duration-200 cursor-pointer">
-            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-5 h-5">
-              <path stroke-linecap="round" stroke-linejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
+            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-5 h-5">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
             </svg>
           </Button>
         </div>
@@ -72,7 +73,7 @@ export function LoginDialog() {
       ) : (
         <div className="flex items-center space-x-4">
           <Button className="rounded-full p-2 bg-button-light ring-1 ring-border text-foreground hover-warm-gradient hover:scale-105 transition-transform duration-200 cursor-pointer">
-            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-5 h-5">
+            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-5 h-5">
               <path stroke-linecap="round" stroke-linejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 11-18 0 9 9 0 0118 0z" />
             </svg>
           </Button>

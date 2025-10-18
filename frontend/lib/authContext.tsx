@@ -19,6 +19,7 @@ interface AuthProviderProps {
 }
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:8080/api';
+const BACKEND_ORIGIN = process.env.NEXT_PUBLIC_BACKEND_URL_ORIGIN || 'http://localhost:8080';
 
 export const AuthProvider = ({ children }: AuthProviderProps) => {
   const [user, setUser] = useState<Partial<User> | null>(null);
@@ -60,63 +61,65 @@ export const AuthProvider = ({ children }: AuthProviderProps) => {
     };
   }, []);
 
-  const login = () => {
-    const authWindow = window.open(`${API_BASE_URL}/auth/google`, '_blank', 'width=500,height=600');
-
-    const messageListener = (event: MessageEvent) => {
-      if (event.origin !== (process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:8080')) {
+    const login = () => {
+      const authWindow = window.open(`${API_BASE_URL}/auth/google`, '_blank', 'width=500,height=600');
+  
+      if (!authWindow) {
+        console.error('Failed to open authentication window. Popup blocked?');
         return;
       }
-
-      const { token: receivedToken, user: receivedUser, message } = event.data;
-
-      if (receivedToken && receivedUser) {
-        localStorage.setItem('jwt_token', receivedToken);
-        localStorage.setItem('user_data', JSON.stringify(receivedUser));
-        setToken(receivedToken);
-        setUser(receivedUser);
-        authWindow?.close();
-        window.removeEventListener('message', messageListener);
-      } else if (message === 'Authentication failed') {
-        console.error('Google authentication failed.');
-        authWindow?.close();
-        window.removeEventListener('message', messageListener);
-      }
+  
+      const messageListener = (event: MessageEvent) => {
+        if (event.origin !== BACKEND_ORIGIN) {
+          return;
+        }
+  
+        const { token: receivedToken, user: receivedUser, message } = event.data;
+  
+        if (receivedToken && receivedUser) {
+          localStorage.setItem('jwt_token', receivedToken);
+          localStorage.setItem('user_data', JSON.stringify(receivedUser));
+                  setToken(receivedToken);
+                  setUser(receivedUser);
+                  try {
+                    authWindow?.close();
+                  } catch (e) {
+                    console.warn('Could not close auth window due to COOP policy:', e);
+                  }
+                  window.removeEventListener('message', messageListener);
+                } else if (message === 'Authentication failed') {
+                  try {
+                    authWindow?.close();
+                  } catch (e) {
+                    console.warn('Could not close auth window due to COOP policy:', e);
+                  }
+                  window.removeEventListener('message', messageListener);        }
+      };
+  
+      window.addEventListener('message', messageListener);
     };
+const logout = () => {
+  localStorage.removeItem('jwt_token');
+  localStorage.removeItem('user_data');
+  setToken(null);
+  setUser(null);
+  axios.get(`${API_BASE_URL}/auth/logout`).catch(console.error);
+};
 
-    window.addEventListener('message', messageListener);
+const isAuthenticated = !!user && !!token;
 
-    const checkPopup = setInterval(() => {
-      if (authWindow?.closed) {
-        clearInterval(checkPopup);
-        window.removeEventListener('message', messageListener);
-        console.error('Google authentication window closed.');
-      }
-    }, 500);
-  };
-
-  const logout = () => {
-    localStorage.removeItem('jwt_token');
-    localStorage.removeItem('user_data');
-    setToken(null);
-    setUser(null);
-    axios.get(`${API_BASE_URL}/auth/logout`).catch(console.error);
-  };
-
-  const isAuthenticated = !!user && !!token;
-
-  return (
-    <AuthContext.Provider value={{
-      user,
-      token,
-      isAuthenticated,
-      isLoading,
-      login,
-      logout,
-    }}>
-      {children}
-    </AuthContext.Provider>
-  );
+return (
+  <AuthContext.Provider value={{
+    user,
+    token,
+    isAuthenticated,
+    isLoading,
+    login,
+    logout,
+  }}>
+    {children}
+  </AuthContext.Provider>
+);
 };
 
 export const useAuth = () => {

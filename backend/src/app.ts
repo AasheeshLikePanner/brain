@@ -139,7 +139,7 @@ app.listen(port, async () => {
     console.log('Scheduled daily memory deduplication job.');
 
     // Schedule the triplet extraction job to run every hour
-    cron.schedule('* * * * *', () => {
+    cron.schedule('0 * * * *', () => {
       console.log('\n---\nRunning scheduled job: extractTriplets\n---');
       extractTriplets();
     }, {

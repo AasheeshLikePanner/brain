@@ -40,6 +40,7 @@
   --radius-lg: var(--radius);
   --radius-xl: calc(var(--radius) + 4px);
   --color-button-light: oklch(0.98 0 0);
+  --color-user-message-bg: var(--user-message-bg);
 }
 
 .dark {
@@ -75,6 +76,7 @@
   --sidebar-border: oklch(1 0 0 / 10%);
   --sidebar-ring: oklch(0.556 0 0);
   --color-button-light: #222222;
+  --user-message-bg: #2c2c2c;
 }
 
 @layer base {

@@ -24,104 +24,68 @@ class ChatService {
     return chat;
   }
 
-  async createChat(userId: string, initialMessage: string): Promise<Chat> {
-    const chat = await prisma.chat.create({
-      data: {
-        userId,
-        title: initialMessage.substring(0, 50),
-        messages: {
-          create: {
-            role: 'user',
-            content: initialMessage,
-          }
-        }
-      },
-      include: {
-        messages: true,
-      }
-    });
-    return chat;
-  }
-
-  async getChatHistory(chatId: string, userId: string): Promise<ChatMessage[]> {
-    const chat = await prisma.chat.findFirst({
-      where: { id: chatId, userId },
-      include: {
-        messages: {
-          orderBy: {
-            createdAt: 'asc',
-          },
-        },
-      },
-    });
-
-    return chat?.messages || [];
-  }
-
   async streamChatResponse(
     chatId: string,
     userId: string,
     message: string
   ): Promise<ReadableStream<Uint8Array>> {
     
-    // ... existing code to save user message ...
-    console.log('[ChatService] Starting streamChatResponse.');
-    // 1. Save user message
-    console.log('[ChatService] Attempting to save user message...');
-    try {
-      await prisma.chatMessage.create({
-        data: {
-          chatId,
-          role: 'user',
-          content: message,
-        },
-      });
-      console.log('[ChatService] Saved user message. Proceeding to get chat history and memories.');
-    } catch (error) {
-      console.error('[ChatService] Error saving user message:', error);
-      throw error; // Re-throw to propagate the error
-    }
-
-    // Get chat history
-    const history = await this.getChatHistory(chatId, userId);
-
-    // EXTRACT ENTITIES from recent conversation for contextual boosting
-    const contextEntities = await this.extractContextEntities(history, message, userId);
-
-    // Search memories with smart scoring
-    const relevantMemories = await memoryIndexService.searchMemories(
-      userId,
-      message,
-      5,
-      contextEntities
-    );
-
-    // Get memory objects with full details
-    const memoryDetails = await prisma.memory.findMany({
-      where: {
-        id: { in: relevantMemories.map(m => m.id) }
-      }
+    console.log('[ChatService] Starting streamChatResponse - OPTIMIZED');
+    
+    // ═══════════════════════════════════════════════════════════════
+    // PHASE 1: PARALLEL DATA GATHERING (CRITICAL PATH)
+    // ═══════════════════════════════════════════════════════════════
+    const startTime = Date.now();
+    
+    // Don't await message save - let it happen in parallel
+    const saveMessagePromise = prisma.chatMessage.create({
+      data: { chatId, role: 'user', content: message }
+    }).catch(err => {
+      console.error('[ChatService] Error saving user message:', err);
+      throw err;
     });
 
-    // PERFORM REASONING on the retrieved memories
-    const implications = await this.reasoningService.detectImplications(
-      userId,
-      memoryDetails,
-      message
-    );
+    // Run ALL data gathering in parallel
+    const [history, contextEntities, relevantMemories] = await Promise.all([
+      this.getChatHistory(chatId, userId),
+      this.extractContextEntitiesQuick(message), // NEW: Fast entity extraction
+      memoryIndexService.searchMemories(userId, message, 5, []), // Will enhance with entities later
+      saveMessagePromise // Ensure save completes
+    ]);
 
-    // Try graph-based reasoning if query seems relational
-    const graphReasoning = await this.reasoningService.graphReasoning(
-      userId,
-      message
-    );
+    console.log(`[ChatService] Phase 1 complete: ${Date.now() - startTime}ms`);
 
-    // ... existing graph query detection ...
-    const contextString = relevantMemories
+    // ═══════════════════════════════════════════════════════════════
+    // PHASE 2: PARALLEL MEMORY FETCH + REASONING
+    // ═══════════════════════════════════════════════════════════════
+    const phase2Start = Date.now();
+
+    // Fetch memory details and run reasoning IN PARALLEL
+    const [memoryDetails, implications, graphReasoning] = await Promise.all([
+      prisma.memory.findMany({
+        where: { id: { in: relevantMemories.map(m => m.id) } },
+        select: {
+          id: true,
+          content: true,
+          type: true,
+          metadata: true,
+          recordedAt: true
+        }
+      }),
+      // Run both reasoning calls in parallel - key optimization!
+      this.reasoningService.detectImplications(userId, relevantMemories, message),
+      this.reasoningService.graphReasoning(userId, message)
+    ]);
+
+    console.log(`[ChatService] Phase 2 complete: ${Date.now() - phase2Start}ms`);
+
+    // ═══════════════════════════════════════════════════════════════
+    // PHASE 3: PROMPT CONSTRUCTION (FAST)
+    // ═══════════════════════════════════════════════════════════════
+    const contextString = memoryDetails
       .map(mem => `[id: ${mem.id}] ${mem.content}`)
       .join('\n---\n');
 
-    // ENHANCED PROMPT CONSTRUCTION with reasoning
     let reasoningContext = '';
     
     if (implications.length > 0) {
@@ -146,36 +110,63 @@ class ChatService {
     const currentDate = new Date().toUTCString();
     const historyText = history.map(m => `${m.role}: ${m.content}`).join('\n');
 
-    const systemPrompt = `You are a helpful assistant with access to the user's personal knowledge base and reasoning capabilities.\n\nYou have analyzed the context and identified some insights:${reasoningContext}\n\nWhen responding:\n1. Use the provided insights to give more helpful, proactive answers\n2. If implications suggest actions, offer them naturally\n3. If there are connections the user might not have considered, mention them\n4. Always cite sources using <Source id=\"...\" />\n\nYour answers must be formatted in MDX.\nWhen you mention a date, wrap it in <DateHighlight>component</DateHighlight>.\nWhen you reference a memory, wrap key insights in <MemoryHighlight>component</MemoryHighlight>.\nWhen you use information from memories, cite with <Source id=\"memory-id\" />.\n\nCurrent context:\n- Current Date/Time: ${currentDate}\n- User Location: [Location not provided]`;
+    const systemPrompt = `You are a helpful assistant with access to the user's personal knowledge base and reasoning capabilities.
 
-    const userPrompt = `Here is the relevant context, including memories from our past conversations, that you should use to answer the question:\nRelevant Memories:\n${contextString}\n\nChat History:\n${historyText}\n\nUser's Question: ${message}`;
+You have analyzed the context and identified some insights:${reasoningContext}
+
+When responding:
+1. Use the provided insights to give more helpful, proactive answers
+2. If implications suggest actions, offer them naturally
+3. If there are connections the user might not have considered, mention them
+4. Always cite sources using <Source id="..." />
+
+Your answers must be formatted in MDX.
+When you mention a date, wrap it in <DateHighlight>component</DateHighlight>.
+When you reference a memory, wrap key insights in <MemoryHighlight>component</MemoryHighlight>.
+When you use information from memories, cite with <Source id="memory-id" />.
+
+Current context:
+- Current Date/Time: ${currentDate}
+- User Location: [Location not provided]`;
+
+    const userPrompt = `Here is the relevant context, including memories from our past conversations, that you should use to answer the question:
+
+Relevant Memories:
+${contextString}
+
+Chat History:
+${historyText}
+
+User's Question: ${message}`;
 
     const prompt = `${systemPrompt}\n\n${userPrompt}`;
 
-    // ... rest of existing streaming logic ...
-    const llmStream = await llmService.generateCompletionStream(prompt);
-    console.log('[ChatService] Received stream from LLM service. Piping to transform stream...');
+    console.log(`[ChatService] Total time to first token: ${Date.now() - startTime}ms`);
 
-    // 5. Use a TransformStream to save the full response while streaming
+    // ═══════════════════════════════════════════════════════════════
+    // PHASE 4: STREAM RESPONSE
+    // ═══════════════════════════════════════════════════════════════
+    const llmStream = await llmService.generateCompletionStream(prompt);
+    console.log('[ChatService] Streaming started');
+
     let fullResponse = '';
     const transformStream = new TransformStream({
       transform(chunk, controller) {
         const text = new TextDecoder().decode(chunk);
-        // Extract content from the Ollama stream format
         try {
           const json = JSON.parse(text);
           if (json.response) {
             fullResponse += json.response;
           }
         } catch (e) {
-          // In case of malformed JSON, just append the raw text
           fullResponse += text;
         }
         controller.enqueue(chunk);
       },
+      
       async flush(controller) {
-        // When the stream is done, save the assistant's message
         console.log('[ChatService] Stream finished. Saving assistant message...');
+        
         await prisma.chatMessage.create({
           data: {
             chatId,
@@ -183,56 +174,67 @@ class ChatService {
             content: fullResponse,
           },
         });
-        console.log(`[ChatService] Saved assistant response for chat ${chatId}.\n---\n${fullResponse}\n---`);
 
-        // Add a job to the memory extraction queue
-        await memoryQueue.add('extract', { userId, chatId, userMessage: message, assistantMessage: fullResponse });
-        console.log(`[ChatService] Added memory extraction job for chat ${chatId} to queue.`);
+        console.log(`[ChatService] Saved assistant response for chat ${chatId}`);
+
+        // Queue memory extraction - don't await
+        memoryQueue.add('extract', { 
+          userId, 
+          chatId, 
+          userMessage: message, 
+          assistantMessage: fullResponse 
+        }).catch(err => console.error('[ChatService] Queue error:', err));
+        
+        console.log(`[ChatService] Memory extraction queued for chat ${chatId}`);
       }
     });
 
     return llmStream.pipeThrough(transformStream);
   }
 
+  // ═══════════════════════════════════════════════════════════════
+  // HELPER METHODS
+  // ═══════════════════════════════════════════════════════════════
+
   /**
- * Extract key entities from recent conversation for contextual boosting
- */
-  private async extractContextEntities(
-    history: ChatMessage[],
-    currentMessage: string,
-    userId: string
-  ): Promise<string[]> {
-    // Get last 5 messages for context
-    const recentMessages = history.slice(-5);
-    const conversationText = recentMessages
-      .map(m => m.content)
-      .join(' ') + ' ' + currentMessage;
-
-    // Simple entity extraction (you can enhance this)
-    const entities: string[] = [];
-
-    // Extract capitalized words (potential named entities)
-    const capitalizedWords = conversationText.match(/\b[A-Z][a-z]+\b/g) || [];
-    entities.push(...capitalizedWords);
-
-    // Extract entities from your graph
-    const graphEntities = await prisma.entity.findMany({
-      where: { userId: userId },
-      select: { name: true }
-    });
-
-    const graphEntityNames = graphEntities.map(e => e.name);
-
-    // Find which graph entities are mentioned in conversation
-    const mentionedEntities = graphEntityNames.filter(name =>
-      conversationText.toLowerCase().includes(name.toLowerCase())
-    );
-
-    entities.push(...mentionedEntities);
-
-    // Return unique entities
-    return [...new Set(entities)];
+   * Quick entity extraction using regex (no DB, no LLM)
+   * Falls back to empty array if no entities found
+   */
+  private extractContextEntitiesQuick(message: string): string[] {
+    // Extract capitalized words/phrases
+    const matches = message.match(/\b[A-Z][a-z]+(?:\s[A-Z][a-z]+)*\b/g) || [];
+    
+    // Filter out common stop words
+    const stopWords = new Set([
+      'I', 'The', 'A', 'An', 'This', 'That', 'My', 'Your', 
+      'We', 'They', 'He', 'She', 'It', 'Could', 'Should', 'Would'
+    ]);
+    
+    const entities = matches.filter(w => !stopWords.has(w));
+    
+    // Return unique entities, limit to 5 most relevant
+    return [...new Set(entities)].slice(0, 5);
   }
+
+  /**
+   * Get chat history with optimized query
+   */
+  public async getChatHistory(chatId: string, userId: string, limit: number = 10) {
+    return prisma.chatMessage.findMany({
+      where: {
+        chatId: chatId,
+        chat: { userId: userId } // Add userId filter for security
+      },
+      select: { 
+        role: true, 
+        content: true 
+      },
+      orderBy: { createdAt: 'asc' }, // Changed to asc for chronological order
+      take: limit
+    });
+  }
+
+  // ... other methods ...
 }
 
 export const chatService = new ChatService();

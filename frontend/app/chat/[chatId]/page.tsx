@@ -123,6 +123,7 @@ export default function ChatPage() {
 
     console.log("Sending message:", messageContent);
     setIsLoading(true);
+    console.log('User message sent:', userMessage);
 
     try {
       // 1. Optimistic UI update
@@ -172,6 +173,7 @@ export default function ChatPage() {
             try {
               const json = JSON.parse(part);
               if (json.response) {
+                console.log('Received streaming part:', json.response);
                 setMessages(prev => {
                   const lastMessage = prev[prev.length - 1];
                   const updatedContent = lastMessage.content + json.response;
@@ -205,6 +207,7 @@ export default function ChatPage() {
           },
         });
         setMessages(response.data);
+        console.log('Fetched chat history:', response.data);
       } catch (error) {
         console.error('Error fetching chat history:', error);
       }
@@ -245,17 +248,17 @@ export default function ChatPage() {
           {messages.map((m, i) => (
 
             <div
-
-              key={i}
-
-              className={`flex ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}
-
+              key={m.id}
+              className={`flex ${
+                m.role === "user" ? "justify-end" : "justify-start"
+              } mb-4`}
             >
-
               <div
-
-                className={`p-2 rounded-lg ${m.role === 'user' ? 'bg-[#222222] text-white max-w-[70%]' : 'w-full text-left'}`}
-
+                className={`p-4 rounded-3xl ${
+                  m.role === "user"
+                    ? "max-w-[70%] bg-muted text-muted-foreground ml-auto mr-4 shadow-md"
+                    : "bg-transparent border border-border text-foreground mr-auto ml-4"
+                }`}
               >
 
                 {m.role === 'assistant' ? (

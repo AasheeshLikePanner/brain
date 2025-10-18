@@ -37,7 +37,9 @@ export const MdxRenderer = ({ source }: MdxRendererProps) => {
   useEffect(() => {
     if (source) {
       const serializeMdx = async () => {
-        const result = await serialize(source, { scope: {}, mdxOptions: {} });
+        const cleanedSource = source
+          .replace(/<MemoryHighlight>component>/g, '<MemoryHighlight />');
+        const result = await serialize(cleanedSource, { scope: {}, mdxOptions: {} });
         setSerializedSource(result);
       };
       serializeMdx();
