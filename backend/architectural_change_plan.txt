@@ -1,0 +1,52 @@
+ARCHITECTURAL CHANGE PLAN
+
+This document outlines the phased approach to refactor the backend architecture for improved performance and scalability.
+
+PHASE 1: REMOVE BOTTLENECK (chat.service.ts)
+  - Action: Modify src/services/chat.service.ts to remove expensive reasoning calls from the critical path in streamChatResponse.
+  - Status: Completed
+
+PHASE 2: CREATE QUERY COMPLEXITY DETECTOR
+  - Action: Create new file src/services/query-analyzer.service.ts with QueryAnalysis interface and QueryAnalyzerService class.
+  - Status: Completed
+
+PHASE 3: CREATE SMART CACHE SERVICE
+  - Action: Create new file src/services/smart-cache.service.ts with CachedInsight interface and SmartCacheService class.
+  - Status: Completed
+
+PHASE 4: UPDATE CHAT SERVICE TO USE SMART CACHING
+  - Action: Modify src/services/chat.service.ts to import and use queryAnalyzerService and smartCacheService.
+  - Action: Update the streamChatResponse method to incorporate query analysis and smart caching for context building.
+  - Action: Update the system prompt construction based on query complexity.
+  - Status: Completed
+
+PHASE 5: CREATE BACKGROUND PRE-COMPUTATION JOB
+  - Action: Create new file src/jobs/smart-precompute.job.ts with smartPrecomputeJob and cleanupCacheJob functions.
+  - Status: Completed
+
+PHASE 6: SCHEDULE THE BACKGROUND JOB
+  - Action: Modify src/app.ts to import and schedule smartPrecomputeJob and cleanupCacheJob using node-cron.
+  - Status: Completed
+
+PHASE 7: INVALIDATE CACHE WHEN MEMORIES ARE UPDATED
+  - Action: Modify src/services/memory-extractor.service.ts to import smartCacheService and invalidate entity caches after memory extraction.
+  - Status: Completed
+
+PHASE 8: ADD MONITORING/METRICS
+  - Action: Create new file src/services/metrics.service.ts with MetricsService class.
+  - Action: Modify src/services/chat.service.ts to import metricsService and track query metrics in the flush function of the TransformStream.
+  - Status: Completed
+
+PHASE 9: ADD METRICS ENDPOINT
+  - Action: Create new file src/controllers/metrics.controller.ts with MetricsController class.
+  - Action: Add a new route /api/metrics to src/app.ts (or the main routes file) to expose the metrics.
+  - Status: Completed
+
+PHASE 10: TEST EVERYTHING
+  - Action: Test simple query.
+  - Action: Test complex query (first time).
+  - Action: Test complex query (second time - cached).
+  - Action: Check metrics endpoint.
+  - Action: Verify background job is working.
+  - Action: Monitor logs.
+  - Status: Pending

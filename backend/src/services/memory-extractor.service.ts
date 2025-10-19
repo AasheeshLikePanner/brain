@@ -4,6 +4,7 @@ import { llmService } from './llm.service';
 import { MemoryType } from '../models/memory';
 import { ContradictionDetectionService } from './contradiction-detection.service';
 import { memoryService } from './memory.service';
+import { smartCacheService } from './smart-cache.service';
 
 interface ExtractedMemory {
   type: MemoryType;
@@ -82,6 +83,21 @@ class MemoryExtractorService {
       }
     }
     console.log(`[MemoryExtractorService] Finished extracting and storing ${extractedMemories.length} memories.`);
+
+    // After storing all memories, invalidate cache for mentioned entities
+    const extractedEntities = new Set<string>();
+    
+    for (const memoryData of extractedMemories) {
+      if (memoryData.entities) {
+        memoryData.entities.forEach(e => extractedEntities.add(e));
+      }
+    }
+    
+    // Invalidate cache for these entities so they'll be recomputed with new info
+    for (const entityName of extractedEntities) {
+      await smartCacheService.invalidateEntity(entityName);
+      console.log(`[MemoryExtractor] Invalidated cache for entity: ${entityName}`);
+    }
   }
 
   private isTemporalProgression(oldContent: string, newContent: string): boolean {

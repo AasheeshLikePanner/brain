@@ -67,7 +67,7 @@ Daily Summary:`;
             content: summaryContent,
             sourceMemoryIds: sourceMemoryIds,
             level: 1, // Daily summary
-            modelName: 'qwen3:1.7B', // Or whatever model is used for summarization
+            modelName: 'qwen2.5:1.5', // Or whatever model is used for summarization
           },
         });
         console.log(`[SummarizationJob] Successfully created daily summary for user ${userId}.`);

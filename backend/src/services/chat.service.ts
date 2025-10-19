@@ -6,6 +6,9 @@ import { memoryIndexService } from './memory-index.service';
 import { Chat, ChatMessage } from '@prisma/client';
 import { memoryQueue } from '../queues/memory.queue';
 import { ReasoningService } from './reasoning.service';
+import { queryAnalyzerService } from './query-analyzer.service';
+import { smartCacheService } from './smart-cache.service';
+import { metricsService } from './metrics.service';
 
 class ChatService {
   private reasoningService: ReasoningService;
@@ -64,12 +67,13 @@ class ChatService {
     console.log(`[ChatService] Phase 1 complete: ${Date.now() - startTime}ms`);
 
     // ═══════════════════════════════════════════════════════════════
-    // PHASE 2: PARALLEL MEMORY FETCH + REASONING
+    // PHASE 2: JUST GET MEMORY DETAILS (FAST PATH)
     // ═══════════════════════════════════════════════════════════════
     const phase2Start = Date.now();
     console.log(`[ChatService] Starting Phase 2 at ${phase2Start}ms`);
 
-    const memoryDetailsPromise = prisma.memory.findMany({
+    // Only get memory details - no expensive reasoning
+    const memoryDetails = await prisma.memory.findMany({
       where: { id: { in: relevantMemories.map(m => m.id) } },
       select: {
         id: true,
@@ -79,14 +83,9 @@ class ChatService {
         recordedAt: true
       }
     });
-    const implicationsPromise = this.reasoningService.detectImplications(userId, relevantMemories, message);
-    const graphReasoningPromise = this.reasoningService.graphReasoning(userId, message);
 
-    const [memoryDetails, implications, graphReasoning] = await Promise.all([
-      memoryDetailsPromise,
-      implicationsPromise,
-      graphReasoningPromise
-    ]);
+    // We'll handle reasoning smartly in next steps
+    console.log(`[ChatService] Phase 2 complete: ${Date.now() - phase2Start}ms`);
 
     console.log(`[ChatService] prisma.memory.findMany took: ${Date.now() - phase2Start}ms`);
     console.log(`[ChatService] reasoningService.detectImplications took: ${Date.now() - phase2Start}ms`);
@@ -94,40 +93,63 @@ class ChatService {
     console.log(`[ChatService] Phase 2 complete: ${Date.now() - phase2Start}ms`);
 
     // ═══════════════════════════════════════════════════════════════
-    // PHASE 3: PROMPT CONSTRUCTION (FAST)
+    // PHASE 3: SMART CONTEXT BUILDING WITH CACHING
     // ═══════════════════════════════════════════════════════════════
-    const promptConstructionStart = Date.now();
+    const phase3Start = Date.now();
+    console.log(`[ChatService] Starting Phase 3 (Smart Context)`);
+
+    // Analyze query complexity
+    const queryAnalysis = queryAnalyzerService.analyzeQuery(message);
+    console.log(`[ChatService] Query analysis:`, queryAnalysis);
+
     const contextString = memoryDetails
       .map(mem => `[id: ${mem.id}] ${mem.content}`)
       .join('\n---\n');
 
     let reasoningContext = '';
-    
-    if (implications.length > 0) {
-      reasoningContext += '\n\n**Relevant Insights:**\n';
-      implications.forEach((imp, i) => {
-        reasoningContext += `${i + 1}. ${imp.content}\n`;
-      });
-    }
 
-    if (graphReasoning.reasoning) {
-      reasoningContext += '\n\n**Graph Analysis:**\n';
-      reasoningContext += graphReasoning.reasoning + '\n';
+    // If complex query, check cache or compute insights
+    if (queryAnalysis.isComplex && queryAnalysis.entities.length > 0) {
+      console.log(`[ChatService] Complex query detected, loading insights...`);
       
-      if (graphReasoning.relevantPaths.length > 0) {
-        reasoningContext += '\nRelevant connections:\n';
-        graphReasoning.relevantPaths.forEach(p => {
-          reasoningContext += `- ${p.explanation}\n`;
-        });
+      for (const entityName of queryAnalysis.entities) {
+        // Try to get cached insights first (fast!)
+        let insights = await smartCacheService.getCachedInsights(entityName);
+        
+        // If not cached, compute lazily (only when needed!)
+        if (!insights) {
+          insights = await smartCacheService.lazyComputeAndCache(
+            userId,
+            entityName,
+            queryAnalysis.needsGraph,
+            queryAnalysis.needsTimeline
+          );
+        }
+        
+        // Add insights to context
+        if (insights.graph && queryAnalysis.needsGraph) {
+          reasoningContext += `\n\n**Relationships for ${entityName}:**\n`;
+          insights.graph.relationships.forEach((r: any) => {
+            reasoningContext += `- ${r.subject} ${r.predicate} ${r.object}\n`;
+          });
+        }
+        
+        if (insights.timeline && queryAnalysis.needsTimeline) {
+          reasoningContext += `\n\n**Timeline for ${entityName}:**\n`;
+          reasoningContext += insights.timeline.narrative + '\n';
+        }
       }
     }
+
+    console.log(`[ChatService] Phase 3 complete: ${Date.now() - phase3Start}ms`);
 
     const currentDate = new Date().toUTCString();
     const historyText = history.map(m => `${m.role}: ${m.content}`).join('\n');
 
-    const systemPrompt = `You are a helpful assistant with access to the user's personal knowledge base and reasoning capabilities.
+    const systemPrompt = queryAnalysis.isComplex 
+      ? `You are a helpful assistant with access to the user's personal knowledge base and reasoning capabilities.
 
-You have analyzed the context and identified some insights:${reasoningContext}
+${reasoningContext ? `You have analyzed the context and identified some insights:${reasoningContext}` : ''}
 
 When responding:
 1. Use the provided insights to give more helpful, proactive answers
@@ -142,7 +164,13 @@ When you use information from memories, cite with <Source id="memory-id" />.
 
 Current context:
 - Current Date/Time: ${currentDate}
-- User Location: [Location not provided]`;
+- User Location: [Location not provided]`
+      : `You are a helpful assistant with access to the user's personal knowledge base.
+
+Your answers must be formatted in MDX.
+Always cite sources using <Source id="memory-id" />.
+
+Current Date/Time: ${currentDate}`;
 
     const userPrompt = `Here is the relevant context, including memories from our past conversations, that you should use to answer the question:
 
@@ -156,7 +184,7 @@ User's Question: ${message}`;
 
     const prompt = `${systemPrompt}\n\n${userPrompt}`;
 
-    console.log(`[ChatService] Prompt construction took: ${Date.now() - promptConstructionStart}ms`);
+
     console.log(`[ChatService] Total time to first token: ${Date.now() - startTime}ms`);
 
     // ═══════════════════════════════════════════════════════════════
@@ -184,28 +212,25 @@ User's Question: ${message}`;
       
       async flush(controller) {
         console.log('[ChatService] Stream finished. Saving assistant message...');
-        const assistantMessageSaveStart = Date.now();
         
         await prisma.chatMessage.create({
-          data: {
-            chatId,
-            role: 'assistant',
-            content: fullResponse,
-          },
+          data: { chatId, role: 'assistant', content: fullResponse }
         });
-
-        console.log(`[ChatService] Saved assistant response for chat ${chatId} in ${Date.now() - assistantMessageSaveStart}ms`);
-
-        // Queue memory extraction - don't await
-        const memoryQueueAddStart = Date.now();
+        
+        // Track metrics
+        await metricsService.trackQuery(userId, message, {
+          isComplex: queryAnalysis.isComplex,
+          cacheHit: reasoningContext.length > 0, // Had cached insights
+          responseTime: Date.now() - startTime,
+          memoriesRetrieved: relevantMemories.length
+        });
+        
+        // Queue memory extraction
         memoryQueue.add('extract', { 
-          userId, 
-          chatId, 
+          userId, chatId, 
           userMessage: message, 
           assistantMessage: fullResponse 
         }).catch(err => console.error('[ChatService] Queue error:', err));
-        
-        console.log(`[ChatService] Memory extraction queued for chat ${chatId} in ${Date.now() - memoryQueueAddStart}ms`);
       }
     });
 

@@ -1,0 +1,64 @@
+## Handling Simple Queries (Non-Complex Queries)
+
+The system is designed to efficiently handle both complex and simple queries. For queries identified as "simple" or "non-complex," the processing flow is streamlined to provide a fast and direct response, avoiding the overhead of advanced reasoning and caching mechanisms that are reserved for more intricate requests.
+
+Here's a detailed breakdown of how simple queries are handled:
+
+### 1. Query Analysis (`queryAnalyzerService`)
+
+*   **Initial Assessment:** When a user's message arrives, it first goes through the `queryAnalyzerService.analyzeQuery(message)` function.
+*   **Pattern Matching:** This service performs fast pattern matching using regular expressions to identify keywords or phrases that typically indicate a need for deeper analysis (e.g., "timeline of," "relationship between," "what do you think").
+*   **Simple Query Identification:** If the query *does not* match any of the predefined patterns for timeline, relationship, or analysis, and therefore does not require graph reasoning or timeline generation, the `queryAnalyzerService` will return a `QueryAnalysis` object where:
+    *   `isComplex` is set to `false`.
+    *   `type` is set to `'simple'`.
+    *   `needsGraph` and `needsTimeline` are both `false`.
+    *   `entities` might still contain extracted capitalized words, but these won't trigger complex logic.
+
+### 2. Streamlined Context Building (`chat.service.ts` - Phase 3)
+
+Once `chat.service.ts` receives the `QueryAnalysis` indicating a simple query (`queryAnalysis.isComplex` is `false`), the "Smart Context Building with Caching" phase proceeds as follows:
+
+*   **Skipping Complex Logic:** The `if (queryAnalysis.isComplex && queryAnalysis.entities.length > 0)` block is entirely skipped. This means:
+    *   No calls are made to `smartCacheService.getCachedInsights`.
+    *   No calls are made to `smartCacheService.lazyComputeAndCache`.
+    *   No graph relationships are computed via `graphService.getRelationships`.
+    *   No timelines are built via `reasoningService.buildTimeline`.
+    *   The `reasoningContext` variable remains an empty string.
+
+*   **Direct Prompt Construction:** The system proceeds directly to constructing the LLM prompt using only the basic context:
+    *   **System Prompt:** The `systemPrompt` is set to the simpler version:
+        ```typescript
+        `You are a helpful assistant with access to the user's personal knowledge base.
+
+        Your answers must be formatted in MDX.
+        Always cite sources using <Source id="memory-id" />.
+
+        Current Date/Time: ${currentDate}`
+        ```
+        This prompt is concise and focuses on providing direct answers based on the personal knowledge base, without instructing the LLM to use complex insights or proactive suggestions.
+
+    *   **User Prompt:** The `userPrompt` is constructed as usual, including:
+        *   `Relevant Memories:` (from Phase 2)
+        *   `Chat History:` (from Phase 1)
+        *   `User's Question:` (the original message)
+
+    *   **Final Prompt:** The simple `systemPrompt` and the `userPrompt` are combined.
+
+### 3. Response Generation and Post-Processing (`chat.service.ts` - Phase 4)
+
+The rest of the flow for simple queries is similar to complex queries, but without the complex reasoning context:
+
+*   **LLM Stream:** The final prompt is sent to `llmService.generateCompletionStream`, and the LLM generates a response.
+*   **Streaming to User:** The response is streamed back to the user.
+*   **Save Assistant Message:** The full assistant's response is saved to the database.
+*   **Track Metrics:** `metricsService.trackQuery` is called. For simple queries, `isComplex` will be `false`, and `cacheHit` will also typically be `false` (as no complex insights were sought or retrieved from cache).
+*   **Queue Memory Extraction:** A job is added to the `memoryQueue` for background triplet extraction from the user's message and the assistant's response.
+
+### Summary for Simple Queries:
+
+*   **Fast Path:** Simple queries follow a faster execution path, bypassing the computationally intensive steps of graph reasoning, timeline generation, and complex insight retrieval.
+*   **Direct LLM Interaction:** The LLM receives a more direct prompt, focused on answering based on retrieved memories and chat history.
+*   **No Caching of Insights:** Since no complex insights are generated, there's no attempt to cache them for simple queries.
+*   **Efficiency:** This approach ensures that the system remains responsive for straightforward questions, dedicating its advanced reasoning capabilities only when truly necessary.
+
+This intelligent routing based on query complexity allows the system to provide an optimal balance between responsiveness and depth of analysis.

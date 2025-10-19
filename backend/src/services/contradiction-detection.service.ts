@@ -79,9 +79,20 @@ If no contradictions, return: {"contradictions": []}`;
 
     try {
       const response = await llmService.generateCompletion(prompt);
+      debugger;
       const parsed = JSON.parse(this.extractJSON(response));
 
-      const contradictions = parsed.contradictions.map((c: any) => ({
+      if (!parsed.contradictions) {
+        return { hasContradictions: false, contradictions: [] };
+      }
+
+      const contradictions = parsed.contradictions
+        .filter((c: any) => 
+          c.existingMemoryIndex !== undefined && 
+          c.existingMemoryIndex >= 0 && 
+          c.existingMemoryIndex < recentMemories.length
+        )
+        .map((c: any) => ({
         existingMemoryId: recentMemories[c.existingMemoryIndex].id,
         existingContent: recentMemories[c.existingMemoryIndex].content,
         reason: c.reason,

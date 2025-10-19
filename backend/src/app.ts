@@ -16,13 +16,15 @@ import { memoryDeduplicationService } from './services/memory-deduplication.serv
 import { applyConfidenceDecay } from './jobs/confidence-decay.job';
 import { MemoryAssociationService } from './services/memory-association.service';
 import { ProactiveService } from './services/proactive.service';
-import prisma from './db';
+import { smartPrecomputeJob, cleanupCacheJob } from './jobs/smart-precompute.job';
+import { metricsController } from './controllers/metrics.controller';
 
 // New: Passport imports
 import passport from 'passport';
 import { Strategy as GoogleStrategy, Profile } from 'passport-google-oauth20';
 // import session from 'express-session'; // Removed: Not needed for token-based auth
 import { authService } from './services/auth.service';
+import prisma from './db';
 
 
 const app = express();
@@ -102,6 +104,9 @@ app.use('/api/graph', graphRoutes);
 
 // New: Use the auth routes
 app.use('/api/auth', authRoutes);
+
+// New: Use the metrics route
+app.get('/api/metrics', metricsController.getMetrics.bind(metricsController));
 
 app.listen(port, async () => {
   console.log(`Server is listening on port ${port}`);
@@ -187,5 +192,27 @@ app.listen(port, async () => {
       }
     });
     console.log('Scheduled hourly proactive alert generation job.');
+
+    // Schedule smart pre-computation (every hour)
+    cron.schedule('0 * * * *', async () => {
+      console.log('[Scheduler] Running smart pre-computation job');
+      try {
+        await smartPrecomputeJob();
+      } catch (error) {
+        console.error('[Scheduler] Smart pre-compute job failed:', error);
+      }
+    });
+    console.log('Scheduled hourly smart pre-computation job.');
+
+    // Schedule cache cleanup (daily at 3 AM)
+    cron.schedule('0 3 * * *', async () => {
+      console.log('[Scheduler] Running cache cleanup job');
+      try {
+        await cleanupCacheJob();
+      } catch (error) {
+        console.error('[Scheduler] Cache cleanup job failed:', error);
+      }
+    });
+    console.log('Scheduled daily cache cleanup job.');
   }
 });

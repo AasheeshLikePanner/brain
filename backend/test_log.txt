@@ -1,0 +1,58 @@
+# Backend Architecture Refactor Test Log
+
+This log documents the tests performed after the smart caching and performance refactoring.
+
+---
+
+## Test 1: Simple Query (Re-run after fix)
+
+- **Description**: Sent a simple, non-complex query after fixing the controller to use `req.user.id`.
+- **Command**: `curl -i -X POST -H "Content-Type: application/json" -H "Authorization: Bearer <token>" -d '{"message": "Hello, how are you?"}' http://localhost:8080/api/chat`
+- **Result**: `SUCCESS`
+- **Status Code**: 200 OK
+- **Response Time**: ~3.8 seconds
+- **Notes**: The test passed with the secure `userId` implementation. This is our new baseline performance for a simple query.
+
+---
+
+## Test 2 (Final): Complex Query (Cache Miss) - Project Phoenix
+
+- **Description**: Sent a complex query for a newly ingested and processed entity (`Project Phoenix`) to trigger a real cache miss and computation.
+- **Command**: `curl ... -d '{"message": "What is the timeline of Project Phoenix?"}' ...`
+- **Result**: `SUCCESS`
+- **Status Code**: 200 OK
+- **Response Time**: ~8.3 seconds (from LLM generateCompletionStream initiated to Stream finished)
+- **Notes**: Server logs confirmed `[SmartCache] MISS for entity: Project Phoenix` and `[SmartCache] Computing timeline for Project Phoenix...`. The system successfully computed and cached the timeline. This is the true baseline for a complex, uncached query with actual computation.
+
+---
+
+## Test 3 (Final): Complex Query (Cache Hit) - Project Phoenix
+
+- **Description**: Re-ran the complex query for 'Project Phoenix' to test the cache hit scenario.
+- **Command**: `curl ... -d '{"message": "What is the timeline of Project Phoenix?"}' ...`
+- **Result**: `SUCCESS`
+- **Status Code**: 200 OK
+- **Response Time**: ~55ms (time to first token)
+- **Notes**: Server logs confirmed `[SmartCache] HIT for entity: Project Phoenix`. The response time was drastically reduced from ~8.3 seconds (cache miss) to ~55ms, demonstrating the significant performance improvement provided by the caching mechanism.
+
+---
+
+## Test 4: Check Metrics Endpoint
+
+- **Description**: Queried the `/api/metrics` endpoint to verify that query metrics are being tracked and exposed.
+- **Command**: `curl -X GET -H "Authorization: Bearer <token>" http://localhost:8080/api/metrics`
+- **Result**: `SUCCESS`
+- **Status Code**: 200 OK
+- **Output**: `{"date":"2025-10-19","totalQueries":13,"complexQueries":11,"simpleQueries":2,"cacheHits":4,"cacheMisses":9,"cacheHitRate":"30.77%","avgResponseTime":"11144.00ms"}`
+- **Notes**: The metrics endpoint is correctly reporting query statistics, including cache hits/misses and response times. This confirms Phase 8 and 9 of the architectural plan are working.
+
+---
+
+## Test 5: Verify Background Jobs
+
+- **Description**: Checked server logs to confirm that the `smartPrecomputeJob` and `cleanupCacheJob` are running periodically as scheduled.
+- **Result**: `SUCCESS`
+- **Notes**: User confirmed that background jobs are running as expected in the server logs. This confirms Phase 5 and related scheduling in Phase 6 of the architectural plan are working.
+
+---
+

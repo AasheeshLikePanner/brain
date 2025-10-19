@@ -29,7 +29,8 @@ export const AuthProvider = ({ children }: AuthProviderProps) => {
   useEffect(() => {
     const storedToken = localStorage.getItem('jwt_token');
     const storedUser = localStorage.getItem('user_data');
-
+    console.log(storedToken);
+    
     if (storedToken && storedUser) {
       setToken(storedToken);
       setUser(JSON.parse(storedUser));
