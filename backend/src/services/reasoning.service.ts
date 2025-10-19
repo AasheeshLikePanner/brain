@@ -169,6 +169,7 @@ Only include high-confidence (>0.6) implications that are genuinely useful.`;
     }>;
     narrative: string;
   }> {
+    console.time(`reasoningService.buildTimeline(${entityName})`);
     // Get all memories mentioning this entity
     const memories = await prisma.memory.findMany({
       where: {
@@ -192,6 +193,7 @@ Only include high-confidence (>0.6) implications that are genuinely useful.`;
     });
 
     if (memories.length === 0) {
+      console.timeEnd(`reasoningService.buildTimeline(${entityName})`);
       return {
         entity: entityName,
         timeline: [],
@@ -215,8 +217,11 @@ Only include high-confidence (>0.6) implications that are genuinely useful.`;
     const prompt = `Given the following chronological events about "${entityName}", create a coherent narrative summary that tells the story of this entity over time.\n\nTIMELINE:\n${timelineText}\n\nCreate a narrative that:\n- Identifies key developments and changes over time\n- Notes relationships and connections that formed\n- Highlights the current state\n- Uses past tense for historical events, present tense for current state\n\nKeep it concise (3-5 sentences) but informative.\n\nNarrative:`;
 
     try {
+      console.time(`llmService.generateCompletion (buildTimeline for ${entityName})`);
       const narrative = await llmService.generateCompletion(prompt);
+      console.timeEnd(`llmService.generateCompletion (buildTimeline for ${entityName})`);
       
+      console.timeEnd(`reasoningService.buildTimeline(${entityName})`);
       return {
         entity: entityName,
         timeline,
@@ -224,6 +229,7 @@ Only include high-confidence (>0.6) implications that are genuinely useful.`;
       };
     } catch (error) {
       console.error('Error building timeline narrative:', error);
+      console.timeEnd(`reasoningService.buildTimeline(${entityName})`);
       return {
         entity: entityName,
         timeline,

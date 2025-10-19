@@ -1,5 +1,6 @@
 export interface QueryAnalysis {
   isComplex: boolean;
+  isFactual: boolean; // Added
   type: 'simple' | 'timeline' | 'relationship' | 'analysis';
   entities: string[];
   needsGraph: boolean;
@@ -13,6 +14,7 @@ class QueryAnalyzerService {
    * Takes < 1ms
    */
   analyzeQuery(query: string): QueryAnalysis {
+    console.time('queryAnalyzerService.analyzeQuery');
     const lowerQuery = query.toLowerCase();
     const entities = this.extractEntities(query);
     
@@ -51,19 +53,29 @@ class QueryAnalyzerService {
     
     // Determine complexity
     const isComplex = needsTimeline || needsGraph || needsAnalysis;
+
+    // Determine if factual (simple query with question words)
+    const factualPatterns = [
+      /what is/i, /who is/i, /when is/i, /where is/i, /how many/i,
+      /define/i, /explain/i, /tell me about/i
+    ];
+    const isFactual = !isComplex && factualPatterns.some(p => p.test(lowerQuery)); // Factual implies not complex
     
     let type: 'simple' | 'timeline' | 'relationship' | 'analysis' = 'simple';
     if (needsTimeline) type = 'timeline';
     else if (needsGraph) type = 'relationship';
     else if (needsAnalysis) type = 'analysis';
     
-    return {
+    const result = {
       isComplex,
+      isFactual, // Added
       type,
       entities,
       needsGraph,
       needsTimeline,
     };
+    console.timeEnd('queryAnalyzerService.analyzeQuery');
+    return result;
   }
   
   /**

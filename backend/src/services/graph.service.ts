@@ -9,7 +9,8 @@ class GraphService {
   }
 
   async getRelationships(userId: string, entityId: string) {
-    return prisma.entityLink.findMany({
+    console.time('graphService.getRelationships');
+    const relationships = await prisma.entityLink.findMany({
       where: {
         OR: [
           {
@@ -29,6 +30,8 @@ class GraphService {
         chatMessage: true,
       },
     });
+    console.timeEnd('graphService.getRelationships');
+    return relationships;
   }
 
   async findRelatedEntities(userId: string, entityName: string, relationshipType: string) {

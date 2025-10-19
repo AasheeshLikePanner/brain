@@ -36,6 +36,7 @@ class MemoryService {
     source: string = 'unknown',
     recordedAt: string | null = null // Changed from temporal to recordedAt
   ) {
+    console.time('memoryService.ingest');
     try {
       console.log('[MemoryService] Starting memory ingestion process...');
       console.log('[MemoryService] Creating new memory record in database...');
@@ -70,10 +71,12 @@ class MemoryService {
       console.log('[MemoryService] Embedding inserted. Memory ingestion complete.');
 
       console.log(`Successfully ingested and embedded memory ${newMemory.id}`);
+      console.timeEnd('memoryService.ingest');
       return newMemory;
 
     } catch (error) {
       console.error('Error during memory ingestion:', error);
+      console.timeEnd('memoryService.ingest');
       throw error;
     }
   }

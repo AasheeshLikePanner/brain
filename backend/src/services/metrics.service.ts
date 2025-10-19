@@ -12,6 +12,7 @@ class MetricsService {
       memoriesRetrieved: number;
     }
   ): Promise<void> {
+    console.time('metricsService.trackQuery');
     try {
       const timestamp = Date.now();
       const date = new Date().toISOString().split('T')[0]; // YYYY-MM-DD
@@ -46,9 +47,10 @@ class MetricsService {
       
       // Expire after 30 days
       await redis.expire(metricsKey, 30 * 24 * 60 * 60);
-      
+      console.timeEnd('metricsService.trackQuery');
     } catch (error) {
       console.error('[Metrics] Error tracking query:', error);
+      console.timeEnd('metricsService.trackQuery');
     }
   }
   

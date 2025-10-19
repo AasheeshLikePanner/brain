@@ -24,6 +24,7 @@ class MemoryExtractorService {
   }
 
   async extractAndStore(userId: string, userMessage: string, assistantMessage: string, chatId: string): Promise<void> {
+    console.time('memoryExtractorService.extractAndStore');
     console.log('[MemoryExtractorService] Starting extraction and storage process...');
     const combinedContent = `User: ${userMessage}\nAssistant: ${assistantMessage}`;
 
@@ -107,6 +108,7 @@ class MemoryExtractorService {
       console.log(`[MemoryExtractorService] Invalidated cache for entity: ${entityName}`);
     }
     console.log('[MemoryExtractorService] Cache invalidation completed.');
+    console.timeEnd('memoryExtractorService.extractAndStore');
   }
 
   private isTemporalProgression(oldContent: string, newContent: string): boolean {
@@ -119,6 +121,7 @@ class MemoryExtractorService {
   }
 
   private async quickDuplicateCheck(userId: string, content: string): Promise<boolean> {
+    console.time('memoryExtractorService.quickDuplicateCheck');
     console.log('[MemoryExtractorService] Performing quick duplicate check...');
     const recentMemories = await prisma.memory.findMany({
       where: {
@@ -130,59 +133,64 @@ class MemoryExtractorService {
       },
       take: 1,
     });
-    return recentMemories.length > 0;
+    const isDuplicate = recentMemories.length > 0;
+    console.timeEnd('memoryExtractorService.quickDuplicateCheck');
+    return isDuplicate;
   }
 
-  private async parseMemories(content: string): Promise<ExtractedMemory[]> {
-    console.log('[MemoryExtractorService] Parsing memories with LLM...');
-    const prompt = `From the following conversation, extract distinct memories. Each memory should be a JSON object with the following fields:
-- type: (string, choose from: ${Object.values(MemoryType).join(', ')})
-- content: (string, the actual memory)
-- importance: (number, 0.0 to 1.0, how important is this memory?)
-- source: (string, e.g., 'chat', 'document', 'observation')
-- temporal: (string, ISO date string if a specific date/time is mentioned, otherwise omit)
-- entities: (array of strings, ALL named entities, especially people, mentioned in the memory)
-
-Additionally, if family relationships are mentioned (e.g., mother, father, brother, sister), extract them as separate memories with type 'relationship' and content describing the relationship (e.g., 'User is mother of Sarah').
-
-Return a JSON array of these memory objects. If no distinct memories are found, return an empty array.
-
-Conversation:
-${content}
-
-Memories (JSON array):`;
-
-    try {
-      const llmResponse = await llmService.generateCompletion(prompt);
-      console.log('[MemoryExtractorService] LLM Raw Response:', llmResponse);
-      if (llmResponse) {
-        const jsonMatch = llmResponse.match(/```json\s*([\s\S]*?)\s*```/);
-        let cleanedResponse = llmResponse;
-        if (jsonMatch && jsonMatch[1]) {
-          cleanedResponse = jsonMatch[1];
-        } else {
-          const directJsonMatch = llmResponse.match(/\s*\[[\s\S]*\]\s*/);
-          if (directJsonMatch && directJsonMatch[0]) {
-            cleanedResponse = directJsonMatch[0];
+    private async parseMemories(content: string): Promise<ExtractedMemory[]> {
+      console.time('memoryExtractorService.parseMemories');
+      console.log('[MemoryExtractorService] Parsing memories with LLM...');
+      const prompt = `From the following conversation, extract distinct memories. Each memory should be a JSON object with the following fields:
+  - type: (string, choose from: ${Object.values(MemoryType).join(', ')})
+  - content: (string, the actual memory)
+  - importance: (number, 0.0 to 1.0, how important is this memory?)
+  - source: (string, e.g., 'chat', 'document', 'observation')
+  - temporal: (string, ISO date string if a specific date/time is mentioned, otherwise omit)
+  - entities: (array of strings, ALL named entities, especially people, mentioned in the memory)
+  
+  Additionally, if family relationships are mentioned (e.g., mother, father, brother, sister), extract them as separate memories with type 'relationship' and content describing the relationship (e.g., 'User is mother of Sarah').
+  
+  Return a JSON array of these memory objects. If no distinct memories are found, return an empty array.
+  
+  Conversation:
+  ${content}
+  
+  Memories (JSON array):`;
+  
+      try {
+        const llmResponse = await llmService.generateCompletion(prompt);
+        console.log('[MemoryExtractorService] LLM Raw Response:', llmResponse);
+        if (llmResponse) {
+          const jsonMatch = llmResponse.match(/```json\s*([\s\S]*?)\s*```/);
+          let cleanedResponse = llmResponse;
+          if (jsonMatch && jsonMatch[1]) {
+            cleanedResponse = jsonMatch[1];
+          } else {
+            const directJsonMatch = llmResponse.match(/\s*\[[\s\S]*\]\s*/);
+            if (directJsonMatch && directJsonMatch[0]) {
+              cleanedResponse = directJsonMatch[0];
+            }
           }
+          const parsedMemories: ExtractedMemory[] = JSON.parse(cleanedResponse);
+          const filteredMemories = parsedMemories.filter(mem => {
+            const lowerContent = mem.content.toLowerCase();
+            return !lowerContent.includes("i don't remember") &&
+                   !lowerContent.includes("i do not remember") &&
+                   !lowerContent.includes("i don't have enough context");
+          });
+          const result = filteredMemories.map(mem => ({
+            ...mem,
+            temporal: mem.temporal ? new Date(mem.temporal) : undefined,
+          }));
+          console.timeEnd('memoryExtractorService.parseMemories');
+          return result;
         }
-        const parsedMemories: ExtractedMemory[] = JSON.parse(cleanedResponse);
-        const filteredMemories = parsedMemories.filter(mem => {
-          const lowerContent = mem.content.toLowerCase();
-          return !lowerContent.includes("i don't remember") &&
-                 !lowerContent.includes("i do not remember") &&
-                 !lowerContent.includes("i don't have enough context");
-        });
-        return filteredMemories.map(mem => ({
-          ...mem,
-          temporal: mem.temporal ? new Date(mem.temporal) : undefined,
-        }));
+      } catch (e) {
+        console.error('[MemoryExtractorService] Failed to parse LLM response for memories:', e);
       }
-    } catch (e) {
-      console.error('[MemoryExtractorService] Failed to parse LLM response for memories:', e);
-    }
-    return [];
-  }
-}
+      console.timeEnd('memoryExtractorService.parseMemories');
+      return [];
+    }}
 
 export const memoryExtractorService = new MemoryExtractorService();

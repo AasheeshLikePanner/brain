@@ -6,7 +6,7 @@ import { memoryIndexService } from './memory-index.service';
 import { Chat, ChatMessage } from '@prisma/client';
 import { memoryQueue } from '../queues/memory.queue';
 import { ReasoningService } from './reasoning.service';
-import { queryAnalyzerService } from './query-analyzer.service';
+import { queryAnalyzerService, QueryAnalysis } from './query-analyzer.service';
 import { smartCacheService } from './smart-cache.service';
 import { metricsService } from './metrics.service';
 import { instantResponseService } from './instant-response.service'; // NEW
@@ -33,15 +33,22 @@ class ChatService {
     userId: string,
     message: string
   ): Promise<ReadableStream<Uint8Array>> {
-    
+    const timings: { [key: string]: number } = {};
+    let t0 = Date.now();
+    let queryAnalysis: QueryAnalysis; // Declared once here
+    console.time('chatService.streamChatResponse');
     const startTime = Date.now(); // Moved to top for instant response timing
     console.log('[ChatService] Starting streamChatResponse - OPTIMIZED');
     
     // ══════════════════════════════════════════════════════════
     // STEP 1: TRY INSTANT RESPONSE (50-100ms)
     // ══════════════════════════════════════════════════════════
+    t0 = Date.now();
     const instantResponse = await instantResponseService.tryInstantResponse(userId, message);
+    timings.instantResponseCheck = Date.now() - t0;
     
+    // Temporarily disabled instant response for prompt logging
+    /*
     if (instantResponse) {
       console.log(`[ChatService] Instant response generated in ${Date.now() - startTime}ms`);
       
@@ -64,6 +71,7 @@ class ChatService {
         }
       });
     }
+    */
     
     console.log('[ChatService] No instant response, calling LLM...');
 
@@ -73,17 +81,42 @@ class ChatService {
     console.log(`[ChatService] Starting Phase 1 at ${startTime}ms`);
 
     const saveMessageStart = Date.now();
+    t0 = Date.now();
     const saveMessagePromise = prisma.chatMessage.create({
       data: { chatId, role: 'user', content: message }
     }).catch(err => {
       console.error('[ChatService] Error saving user message:', err);
       throw err;
     });
+    timings.dbSave = Date.now() - t0;
     console.log(`[ChatService] User message save initiated: ${Date.now() - saveMessageStart}ms`);
 
+    console.time('chatService.getChatHistory');
+    t0 = Date.now();
     const historyPromise = this.getChatHistory(chatId, userId);
+    timings.getHistory = Date.now() - t0;
+    console.timeEnd('chatService.getChatHistory');
+    console.time('chatService.extractContextEntitiesQuick');
     const entitiesPromise = this.extractContextEntitiesQuick(message);
-    const searchMemoriesPromise = memoryIndexService.searchMemories(userId, message, 5, []);
+    console.timeEnd('chatService.extractContextEntitiesQuick');
+    // Analyze query FIRST to determine how many memories to fetch
+    queryAnalysis = queryAnalyzerService.analyzeQuery(message);
+
+    // Adaptive memory limit based on query type
+    const memoryLimit = queryAnalysis.isFactual ? 1 :
+                        !queryAnalysis.isComplex ? 2 : // Simple queries (not factual, not complex)
+                        5; // default for complex queries
+
+    console.time('memoryIndexService.searchMemories');
+    t0 = Date.now();
+    const searchMemoriesPromise = memoryIndexService.searchMemories(
+      userId,
+      message,
+      memoryLimit, // Dynamic limit
+      []
+    );
+    timings.searchMemories = Date.now() - t0;
+    console.timeEnd('memoryIndexService.searchMemories');
 
     const [history, contextEntities, relevantMemories] = await Promise.all([
       historyPromise,
@@ -104,6 +137,7 @@ class ChatService {
     console.log(`[ChatService] Starting Phase 2 at ${phase2Start}ms`);
 
     // Only get memory details - no expensive reasoning
+    t0 = Date.now();
     const memoryDetails = await prisma.memory.findMany({
       where: { id: { in: relevantMemories.map(m => m.id) } },
       select: {
@@ -114,6 +148,7 @@ class ChatService {
         recordedAt: true
       }
     });
+    timings.getMemoryDetails = Date.now() - t0;
 
     // We'll handle reasoning smartly in next steps
     console.log(`[ChatService] Phase 2 complete: ${Date.now() - phase2Start}ms`);
@@ -130,7 +165,9 @@ class ChatService {
     console.log(`[ChatService] Starting Phase 3 (Smart Context)`);
 
     // Analyze query complexity
-    const queryAnalysis = queryAnalyzerService.analyzeQuery(message);
+    console.time('queryAnalyzerService.analyzeQuery');
+    queryAnalysis = queryAnalyzerService.analyzeQuery(message);
+    console.timeEnd('queryAnalyzerService.analyzeQuery');
     console.log(`[ChatService] Query analysis:`, queryAnalysis);
 
     const contextString = memoryDetails
@@ -145,16 +182,20 @@ class ChatService {
       
       for (const entityName of queryAnalysis.entities) {
         // Try to get cached insights first (fast!)
+        console.time(`smartCacheService.getCachedInsights(${entityName})`);
         let insights = await smartCacheService.getCachedInsights(entityName);
+        console.timeEnd(`smartCacheService.getCachedInsights(${entityName})`);
         
         // If not cached, compute lazily (only when needed!)
         if (!insights) {
+          console.time(`smartCacheService.lazyComputeAndCache(${entityName})`);
           insights = await smartCacheService.lazyComputeAndCache(
             userId,
             entityName,
             queryAnalysis.needsGraph,
             queryAnalysis.needsTimeline
           );
+          console.timeEnd(`smartCacheService.lazyComputeAndCache(${entityName})`);
         }
         
         // Add insights to context
@@ -215,6 +256,15 @@ User's Question: ${message}`;
 
     const prompt = `${systemPrompt}\n\n${userPrompt}`;
 
+    console.log("--- Final LLM Prompt (System) ---");
+    console.log(systemPrompt);
+    console.log("--- Final LLM Prompt (User) ---");
+    console.log(userPrompt);
+    console.log("--- Final LLM Prompt (Combined) ---");
+    console.log(prompt);
+    console.log(`--- Prompt Word Count (Rough Estimate): ${prompt.split(/\s+/).length} ---`);
+    console.log("-----------------------------------");
+
 
     console.log(`[ChatService] Total time to first token: ${Date.now() - startTime}ms`);
 
@@ -222,7 +272,11 @@ User's Question: ${message}`;
     // PHASE 4: STREAM RESPONSE
     // ═══════════════════════════════════════════════════════════════
     const llmCallStart = Date.now();
+    console.time('llmService.generateCompletionStream');
+    t0 = Date.now();
     const llmStream = await llmService.generateCompletionStream(prompt);
+    timings.llmGeneration = Date.now() - t0;
+    console.timeEnd('llmService.generateCompletionStream');
     console.log(`[ChatService] LLM generateCompletionStream initiated: ${Date.now() - llmCallStart}ms`);
     console.log('[ChatService] Streaming started');
 
@@ -248,26 +302,31 @@ User's Question: ${message}`;
           data: { chatId, role: 'assistant', content: fullResponse }
         });
         
-        // 🔥 CACHE FOR FUTURE INSTANT RESPONSES
+        console.time('instantResponseService.cacheResponse');
         await instantResponseService.cacheResponse(userId, message, fullResponse);
+        console.timeEnd('instantResponseService.cacheResponse');
 
-        // Track metrics
+        console.time('metricsService.trackQuery');
         await metricsService.trackQuery(userId, message, {
           isComplex: queryAnalysis.isComplex,
           cacheHit: reasoningContext.length > 0, // Had cached insights
           responseTime: Date.now() - startTime,
           memoriesRetrieved: relevantMemories.length
         });
+        console.timeEnd('metricsService.trackQuery');
         
-        // Queue memory extraction
+        console.time('memoryQueue.add');
         memoryQueue.add('extract', { 
           userId, chatId, 
           userMessage: message, 
           assistantMessage: fullResponse 
         }).catch(err => console.error('[ChatService] Queue error:', err));
+        console.timeEnd('memoryQueue.add');
       }
     });
 
+    console.timeEnd('chatService.streamChatResponse');
+    console.log('[TIMING BREAKDOWN]', JSON.stringify(timings, null, 2));
     return llmStream.pipeThrough(transformStream);
   }
 
@@ -280,6 +339,7 @@ User's Question: ${message}`;
    * Falls back to empty array if no entities found
    */
   private extractContextEntitiesQuick(message: string): string[] {
+    console.time('chatService.extractContextEntitiesQuick');
     // Extract capitalized words/phrases
     const matches = message.match(/\b[A-Z][a-z]+(?:\s[A-Z][a-z]+)*\b/g) || [];
     
@@ -292,25 +352,24 @@ User's Question: ${message}`;
     const entities = matches.filter(w => !stopWords.has(w));
     
     // Return unique entities, limit to 5 most relevant
-    return [...new Set(entities)].slice(0, 5);
+    const result = [...new Set(entities)].slice(0, 5);
+    console.timeEnd('chatService.extractContextEntitiesQuick');
+    return result;
   }
 
   /**
    * Get chat history with optimized query
    */
-  public async getChatHistory(chatId: string, userId: string, limit: number = 10) {
-    return prisma.chatMessage.findMany({
-      where: {
-        chatId: chatId,
-        chat: { userId: userId } // Add userId filter for security
-      },
-      select: { 
-        role: true, 
-        content: true 
-      },
-      orderBy: { createdAt: 'asc' }, // Changed to asc for chronological order
-      take: limit
+  public async getChatHistory(chatId: string, userId: string, limit: number = 3) {
+    console.time('chatService.getChatHistory');
+    const history = await prisma.chatMessage.findMany({
+      where: { chatId, chat: { userId } },
+      select: { role: true, content: true },
+      orderBy: { createdAt: 'desc' },
+      take: 3  // Only last 3 messages (1.5 turns)
     });
+    console.timeEnd('chatService.getChatHistory');
+    return history.reverse(); // Chronological order
   }
 
   // ... other methods ...

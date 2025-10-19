@@ -6,6 +6,9 @@ services:
     volumes:
       - ollama_data:/root/.ollama
     tty: true
+    environment:
+      - OLLAMA_NUM_PARALLEL=1
+      - OLLAMA_MAX_LOADED_MODELS=2
 
   postgres:
     image: pgvector/pgvector:pg16

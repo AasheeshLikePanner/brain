@@ -14,6 +14,7 @@ class InstantResponseService {
    * Returns response if possible, null if needs LLM
    */
   async tryInstantResponse(userId: string, query: string): Promise<string | null> {
+    console.time('instantResponseService.tryInstantResponse');
     const lowerQuery = query.toLowerCase().trim();
     
     // ══════════════════════════════════════════════════════════
@@ -77,16 +78,27 @@ class InstantResponseService {
     }
     
     // ══════════════════════════════════════════════════════════
-    // 2. SEMANTIC CACHE CHECK (50ms)
+    // 2. EXACT CACHE CHECK (very fast)
+    // ══════════════════════════════════════════════════════════
+    const exactCachedResponse = await this.findExact(userId, query);
+    if (exactCachedResponse) {
+      console.log('[InstantResponse] Exact cache HIT, returning immediately');
+      console.timeEnd('instantResponseService.tryInstantResponse');
+      return exactCachedResponse;
+    }
+
+    // ══════════════════════════════════════════════════════════
+    // 3. SEMANTIC CACHE CHECK (50ms)
     // ══════════════════════════════════════════════════════════
     const cachedResponse = await this.checkSemanticCache(userId, query);
     if (cachedResponse) {
       console.log('[InstantResponse] Semantic cache HIT');
+      console.timeEnd('instantResponseService.tryInstantResponse');
       return cachedResponse;
     }
     
     // ══════════════════════════════════════════════════════════
-    // 3. DIRECT FACT LOOKUP (100ms)
+    // 4. DIRECT FACT LOOKUP (100ms)
     // For "what is X" queries, try to find exact memory
     // ══════════════════════════════════════════════════════════
     if (/^what (is|are|was|were)/i.test(query)) {
@@ -101,6 +113,7 @@ class InstantResponseService {
     // 4. NO INSTANT RESPONSE AVAILABLE - NEED LLM
     // ══════════════════════════════════════════════════════════
     console.log('[InstantResponse] No instant response available, needs LLM');
+    console.timeEnd('instantResponseService.tryInstantResponse');
     return null;
   }
   
@@ -112,6 +125,7 @@ class InstantResponseService {
     userId: string,
     keywords: string[]
   ): Promise<string | null> {
+    console.time('instantResponseService.getFactFromMemory');
     try {
       // Search memories for keywords using SQL LIKE
       for (const keyword of keywords) {
@@ -137,16 +151,20 @@ class InstantResponseService {
           );
           
           if (relevantSentence) {
+            console.timeEnd('instantResponseService.getFactFromMemory');
             return relevantSentence.trim() + '.';
           }
           
+          console.timeEnd('instantResponseService.getFactFromMemory');
           return memory.content;
         }
       }
       
+      console.timeEnd('instantResponseService.getFactFromMemory');
       return null;
     } catch (error) {
       console.error('[InstantResponse] Error getting fact from memory:', error);
+      console.timeEnd('instantResponseService.getFactFromMemory');
       return null;
     }
   }
@@ -159,10 +177,14 @@ class InstantResponseService {
     userId: string,
     query: string
   ): Promise<string | null> {
+    console.time('instantResponseService.tryDirectFactLookup');
     try {
       // Extract subject from "what is X" query
       const match = query.match(/what (is|are|was|were)\s+(.+?)(\?|$)/i);
-      if (!match) return null;
+      if (!match) {
+        console.timeEnd('instantResponseService.tryDirectFactLookup');
+        return null;
+      }
       
       const subject = match[2].trim();
       
@@ -182,7 +204,10 @@ class InstantResponseService {
         take: 3
       });
       
-      if (memories.length === 0) return null;
+      if (memories.length === 0) {
+        console.timeEnd('instantResponseService.tryDirectFactLookup');
+        return null;
+      }
       
       // If we have clear definition, return it
       for (const mem of memories) {
@@ -192,19 +217,23 @@ class InstantResponseService {
           content.includes(`${subject.toLowerCase()} are`) ||
           content.includes(`${subject.toLowerCase()} refers to`)
         ) {
+          console.timeEnd('instantResponseService.tryDirectFactLookup');
           return mem.content;
         }
       }
       
       // Otherwise, combine top memories
       if (memories.length === 1) {
+        console.timeEnd('instantResponseService.tryDirectFactLookup');
         return memories[0].content;
       }
       
+      console.timeEnd('instantResponseService.tryDirectFactLookup');
       return `Based on what I know: ${memories.map(m => m.content).join(' ')}`;
       
     } catch (error) {
       console.error('[InstantResponse] Error in direct fact lookup:', error);
+      console.timeEnd('instantResponseService.tryDirectFactLookup');
       return null;
     }
   }
@@ -212,18 +241,50 @@ class InstantResponseService {
   /**
    * Check semantic cache (embedding-based similarity)
    */
+  /**
+   * Check semantic cache (embedding-based similarity)
+   */
+  private async findExact(userId: string, query: string): Promise<string | null> {
+    console.time('instantResponseService.findExact');
+    try {
+      const cacheKey = `query_cache:${userId}`;
+      const cached = await redis.lrange(cacheKey, 0, 50);
+
+      for (const item of cached) {
+        const data = JSON.parse(item);
+        if (data.query === query) {
+          console.log('[InstantResponse] Exact cache HIT');
+          console.timeEnd('instantResponseService.findExact');
+          return data.response;
+        }
+      }
+      console.timeEnd('instantResponseService.findExact');
+      return null;
+    } catch (error) {
+      console.error('[InstantResponse] Error in findExact:', error);
+      console.timeEnd('instantResponseService.findExact');
+      return null;
+    }
+  }
+
   private async checkSemanticCache(
     userId: string,
     query: string
   ): Promise<string | null> {
+    console.time('instantResponseService.checkSemanticCache');
     try {
       const cacheKey = `query_cache:${userId}`;
       const cached = await redis.lrange(cacheKey, 0, 50);
       
-      if (cached.length === 0) return null;
+      if (cached.length === 0) {
+        console.timeEnd('instantResponseService.checkSemanticCache');
+        return null;
+      }
       
       // Generate embedding for query
+      console.time('llmService.createEmbedding (semantic cache)');
       const queryEmbedding = await llmService.createEmbedding(query);
+      console.timeEnd('llmService.createEmbedding (semantic cache)');
       
       // Check similarity with cached queries
       for (const item of cached) {
@@ -233,13 +294,16 @@ class InstantResponseService {
         // 85% similarity threshold
         if (similarity >= 0.85) {
           console.log(`[InstantResponse] Cache hit with ${(similarity * 100).toFixed(1)}% similarity`);
+          console.timeEnd('instantResponseService.checkSemanticCache');
           return data.response;
         }
       }
       
+      console.timeEnd('instantResponseService.checkSemanticCache');
       return null;
     } catch (error) {
       console.error('[InstantResponse] Error checking semantic cache:', error);
+      console.timeEnd('instantResponseService.checkSemanticCache');
       return null;
     }
   }
@@ -259,8 +323,11 @@ class InstantResponseService {
     query: string,
     response: string
   ): Promise<void> {
+    console.time('instantResponseService.cacheResponse');
     try {
+      console.time('llmService.createEmbedding (cacheResponse)');
       const queryEmbedding = await llmService.createEmbedding(query);
+      console.timeEnd('llmService.createEmbedding (cacheResponse)');
       
       const cacheData = JSON.stringify({
         query,
@@ -273,9 +340,10 @@ class InstantResponseService {
       await redis.lpush(cacheKey, cacheData);
       await redis.ltrim(cacheKey, 0, 49); // Keep last 50
       await redis.expire(cacheKey, 7200); // 2 hours
-      
+      console.timeEnd('instantResponseService.cacheResponse');
     } catch (error) {
       console.error('[InstantResponse] Error caching response:', error);
+      console.timeEnd('instantResponseService.cacheResponse');
     }
   }
 }

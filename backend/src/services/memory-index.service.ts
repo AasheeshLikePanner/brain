@@ -125,7 +125,7 @@ class MemoryIndexService {
     const vectorString = `[${queryEmbedding.join(',')}]`;
 
     // Get MORE results than needed because we'll re-score
-    const fetchLimit = limit * 3;
+    const fetchLimit = 10; // Get top 10 candidates initially
 
     // Fetch memories with all necessary fields for scoring
     const rawResults: any[] = await prisma.$queryRaw`
@@ -176,10 +176,10 @@ class MemoryIndexService {
       };
     });
 
-    // Sort by final score and take top results
+    // Sort by final score, filter by relevance, and take top 5
     scoredResults.sort((a, b) => b.score - a.score);
 
-    return scoredResults.slice(0, limit);
+    return scoredResults.filter(r => r.score > 0.7).slice(0, 5); // Max 5, but only if relevant
   }
 
   async fullTextSearch(userId: string, query: string, limit: number = 5): Promise<SearchResult[]> {
@@ -212,19 +212,26 @@ class MemoryIndexService {
     limit: number = 5,
     contextEntities?: string[]
   ): Promise<SearchResult[]> {
+    console.time('memoryIndexService.searchMemories');
     // Generate query embedding
+    console.time('llmService.createEmbedding (searchMemories)');
     const queryEmbedding = await llmService.createEmbedding(query);
+    console.timeEnd('llmService.createEmbedding (searchMemories)');
 
     // Perform vector search with smart scoring
+    console.time('memoryIndexService.vectorSearch');
     const vectorResults = await this.vectorSearch(
       userId,
       queryEmbedding,
       limit,
       contextEntities
     );
+    console.timeEnd('memoryIndexService.vectorSearch');
 
     // Perform full-text search
+    console.time('memoryIndexService.fullTextSearch');
     const ftsResults = await this.fullTextSearch(userId, query, limit);
+    console.timeEnd('memoryIndexService.fullTextSearch');
 
     // Combine and deduplicate
     const combined = new Map<string, any>();
@@ -255,9 +262,12 @@ class MemoryIndexService {
     // IMPORTANT: Track that these memories were accessed
     const memoryIds = results.map(r => r.id);
     if (memoryIds.length > 0) {
+      console.time('memoryIndexService.trackMemoryAccess');
       await this.trackMemoryAccess(memoryIds);
+      console.timeEnd('memoryIndexService.trackMemoryAccess');
     }
 
+    console.timeEnd('memoryIndexService.searchMemories');
     return results;
   }
 

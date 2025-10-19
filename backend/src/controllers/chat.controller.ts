@@ -83,6 +83,7 @@ class ChatController {
   }
 
   streamMessage = async (req: Request, res: Response) => {
+    console.time('chatController.streamMessage');
     debugger;
     console.log('\n[ChatController] Received request to stream message.');
     const { chatId } = req.params;
@@ -100,12 +101,16 @@ class ChatController {
         },
         close() {
           res.end();
+          console.timeEnd('chatController.streamMessage');
         }
       }));
 
     } catch (error) {
       console.error('Error streaming message:', error);
-      res.status(500).json({ error: 'Failed to stream message.' });
+      if (!res.headersSent) {
+        res.status(500).json({ error: 'Failed to stream message.' });
+      }
+      console.timeEnd('chatController.streamMessage');
     }
   }
 
