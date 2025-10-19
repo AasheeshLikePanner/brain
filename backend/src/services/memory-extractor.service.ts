@@ -24,22 +24,29 @@ class MemoryExtractorService {
   }
 
   async extractAndStore(userId: string, userMessage: string, assistantMessage: string, chatId: string): Promise<void> {
-    console.log('[MemoryExtractorService] Extracting and storing memories...');
+    console.log('[MemoryExtractorService] Starting extraction and storage process...');
     const combinedContent = `User: ${userMessage}\nAssistant: ${assistantMessage}`;
 
-    // 1. Quick Duplicate Check (Placeholder)
+    console.log('[MemoryExtractorService] Performing quick duplicate check...');
     const isDuplicate = await this.quickDuplicateCheck(userId, combinedContent);
     if (isDuplicate) {
       console.log('[MemoryExtractorService] Duplicate content detected, skipping extraction.');
       return;
     }
+    console.log('[MemoryExtractorService] Quick duplicate check completed.');
 
-    // 2. LLM-based Extraction (Placeholder)
+    console.log('[MemoryExtractorService] Parsing memories with LLM...');
     const extractedMemories: ExtractedMemory[] = await this.parseMemories(combinedContent);
+    console.log(`[MemoryExtractorService] LLM parsing completed. Extracted ${extractedMemories.length} memories.`);
 
-    // 3. Store Memories and Embeddings
+    if (extractedMemories.length === 0) {
+      console.log('[MemoryExtractorService] No memories extracted, skipping storage.');
+      return;
+    }
+
+    console.log('[MemoryExtractorService] Starting to store extracted memories and embeddings...');
     for (const memoryData of extractedMemories) {
-      // Create the memory first
+      console.log(`[MemoryExtractorService] Ingesting memory: ${memoryData.content.substring(0, 50)}...`);
       const memory = await memoryService.ingest(
         userId,
         memoryData.content,
@@ -48,19 +55,20 @@ class MemoryExtractorService {
         memoryData.source,
         memoryData.temporal?.toISOString()
       );
+      console.log(`[MemoryExtractorService] Memory ${memory.id} ingested. Checking for contradictions...`);
 
-      // Check for contradictions
       const contradictionCheck = await this.contradictionService.detectContradictions(
         userId,
         memoryData.content,
         memory.id
       );
+      console.log(`[MemoryExtractorService] Contradiction check completed for memory ${memory.id}. Has contradictions: ${contradictionCheck.hasContradictions}`);
 
       if (contradictionCheck.hasContradictions) {
         console.log(`[Contradiction Detected] Memory ${memory.id} contradicts existing memories`);
         
         for (const contradiction of contradictionCheck.contradictions) {
-          // Determine if it's temporal progression or true contradiction
+          console.log(`[MemoryExtractorService] Resolving contradiction for memory ${memory.id} with existing memory ${contradiction.existingMemoryId}`);
           const isProgression = this.isTemporalProgression(
             contradiction.existingContent,
             memoryData.content
@@ -79,12 +87,13 @@ class MemoryExtractorService {
               'contradiction_noted'
             );
           }
+          console.log(`[MemoryExtractorService] Contradiction resolved for memory ${memory.id}.`);
         }
       }
     }
-    console.log(`[MemoryExtractorService] Finished extracting and storing ${extractedMemories.length} memories.`);
+    console.log(`[MemoryExtractorService] Finished storing all ${extractedMemories.length} memories.`);
 
-    // After storing all memories, invalidate cache for mentioned entities
+    console.log('[MemoryExtractorService] Invalidating cache for mentioned entities...');
     const extractedEntities = new Set<string>();
     
     for (const memoryData of extractedMemories) {
@@ -93,11 +102,11 @@ class MemoryExtractorService {
       }
     }
     
-    // Invalidate cache for these entities so they'll be recomputed with new info
     for (const entityName of extractedEntities) {
       await smartCacheService.invalidateEntity(entityName);
-      console.log(`[MemoryExtractor] Invalidated cache for entity: ${entityName}`);
+      console.log(`[MemoryExtractorService] Invalidated cache for entity: ${entityName}`);
     }
+    console.log('[MemoryExtractorService] Cache invalidation completed.');
   }
 
   private isTemporalProgression(oldContent: string, newContent: string): boolean {

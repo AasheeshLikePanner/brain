@@ -37,7 +37,8 @@ class MemoryService {
     recordedAt: string | null = null // Changed from temporal to recordedAt
   ) {
     try {
-      console.log('[MemoryService] Ingesting new memory...');
+      console.log('[MemoryService] Starting memory ingestion process...');
+      console.log('[MemoryService] Creating new memory record in database...');
       const newMemory = await prisma.memory.create({
         data: {
           userId,
@@ -66,7 +67,7 @@ class MemoryService {
         INSERT INTO "embeddings" ("id", "memoryId", "modelName", "embedding")
         VALUES (${embeddingId}::uuid, ${newMemory.id}::uuid, 'nomic-embed-text', ${vectorString}::vector)
       `;
-      console.log('[MemoryService] Embedding inserted.');
+      console.log('[MemoryService] Embedding inserted. Memory ingestion complete.');
 
       console.log(`Successfully ingested and embedded memory ${newMemory.id}`);
       return newMemory;

@@ -9,6 +9,7 @@ import { ReasoningService } from './reasoning.service';
 import { queryAnalyzerService } from './query-analyzer.service';
 import { smartCacheService } from './smart-cache.service';
 import { metricsService } from './metrics.service';
+import { instantResponseService } from './instant-response.service'; // NEW
 
 class ChatService {
   private reasoningService: ReasoningService;
@@ -33,12 +34,42 @@ class ChatService {
     message: string
   ): Promise<ReadableStream<Uint8Array>> {
     
+    const startTime = Date.now(); // Moved to top for instant response timing
     console.log('[ChatService] Starting streamChatResponse - OPTIMIZED');
     
+    // ══════════════════════════════════════════════════════════
+    // STEP 1: TRY INSTANT RESPONSE (50-100ms)
+    // ══════════════════════════════════════════════════════════
+    const instantResponse = await instantResponseService.tryInstantResponse(userId, message);
+    
+    if (instantResponse) {
+      console.log(`[ChatService] Instant response generated in ${Date.now() - startTime}ms`);
+      
+      // Save messages
+      await prisma.chatMessage.create({
+        data: { chatId, role: 'user', content: message }
+      });
+      await prisma.chatMessage.create({
+        data: { chatId, role: 'assistant', content: instantResponse }
+      });
+      
+      // Return instantly
+      return new ReadableStream({
+        start(controller) {
+          const encoder = new TextEncoder();
+          controller.enqueue(encoder.encode(JSON.stringify({
+            response: instantResponse
+          })));
+          controller.close();
+        }
+      });
+    }
+    
+    console.log('[ChatService] No instant response, calling LLM...');
+
     // ═══════════════════════════════════════════════════════════════
     // PHASE 1: PARALLEL DATA GATHERING (CRITICAL PATH)
     // ═══════════════════════════════════════════════════════════════
-    const startTime = Date.now();
     console.log(`[ChatService] Starting Phase 1 at ${startTime}ms`);
 
     const saveMessageStart = Date.now();
@@ -217,6 +248,9 @@ User's Question: ${message}`;
           data: { chatId, role: 'assistant', content: fullResponse }
         });
         
+        // 🔥 CACHE FOR FUTURE INSTANT RESPONSES
+        await instantResponseService.cacheResponse(userId, message, fullResponse);
+
         // Track metrics
         await metricsService.trackQuery(userId, message, {
           isComplex: queryAnalysis.isComplex,

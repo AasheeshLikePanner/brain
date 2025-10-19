@@ -27,7 +27,11 @@ export const memoryWorker = new Worker<MemoryExtractionJob>(
     await memoryExtractorService.extractAndStore(job.data.userId, job.data.userMessage, job.data.assistantMessage, job.data.chatId);
     console.log(`[MemoryWorker] Finished processing job ${job.id}.` );
   },
-  { connection: redis }
+  {
+    connection: redis,
+    lockDuration: 300000, // Set lock duration to 5 minutes (300,000 ms)
+    stalledInterval: 30000, // Check for stalled jobs every 30 seconds (default)
+  }
 );
 
 memoryWorker.on('completed', (job) => {
