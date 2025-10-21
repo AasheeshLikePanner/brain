@@ -122,23 +122,34 @@ User's Question: ${message}`;
     // Step 7: Stream the response from the LLM
     const llmStream = await llmService.generateCompletionStream(prompt);
 
-    let fullResponse = '';
+    let fullResponseText = '';
     const transformStream = new TransformStream({
       transform(chunk, controller) {
-        const text = new TextDecoder().decode(chunk);
-        fullResponse += text;
+        const jsonString = new TextDecoder().decode(chunk);
+        const lines = jsonString.split('\n').filter(line => line.trim() !== '');
+        for (const line of lines) {
+          try {
+            const parsed = JSON.parse(line);
+            if (parsed.response) {
+              fullResponseText += parsed.response;
+            }
+          } catch (e) {
+            console.warn('Could not parse JSON chunk from stream:', line);
+          }
+        }
         controller.enqueue(chunk);
       },
       async flush(controller) {
         await prisma.chatMessage.create({
-          data: { chatId, role: 'assistant', content: fullResponse }
+          data: { chatId, role: 'assistant', content: fullResponseText },
         });
-        memoryQueue.add('extract', { 
-          userId, chatId, 
-          userMessage: message, 
-          assistantMessage: fullResponse 
+        memoryQueue.add('extract', {
+          userId,
+          chatId,
+          userMessage: message,
+          assistantMessage: fullResponseText,
         });
-      }
+      },
     });
 
     return llmStream.pipeThrough(transformStream);

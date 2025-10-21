@@ -551,7 +551,10 @@ Only include implications with confidence > 0.5 that are genuinely useful.`;
     return `${Math.floor(days / 365)} years ago`;
   }
 
-  private getDaysSince(date: Date): number {
+  private getDaysSince(date: Date | null | undefined): number {
+    if (!date) {
+      return 0; // Treat null or undefined dates as now
+    }
     return (Date.now() - date.getTime()) / (1000 * 60 * 60 * 24);
   }
 
