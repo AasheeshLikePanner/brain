@@ -1,6 +1,6 @@
 import prisma from '../db';
 import { llmService } from './llm.service';
-import { graphService } from './graph.service';
+import { graphService, EntityLinkWithEntities } from './graph.service';
 
 interface Implication {
   type: 'action_suggestion' | 'connection' | 'gap' | 'contradiction';
@@ -914,7 +914,7 @@ Narrative:`;
         limit: 20
       });
 
-      for (const rel of relationships) {
+      for (const rel of relationships as EntityLinkWithEntities[]) {
         const relatedEntity = rel.entityId === entity.id ? rel.objectEntity : rel.subjectEntity;
         const relType = rel.role || 'related_to';
 
@@ -942,7 +942,7 @@ Narrative:`;
             limit: 5
           });
 
-          for (const rel2 of secondDegree) {
+          for (const rel2 of secondDegree as EntityLinkWithEntities[]) {
             const finalEntity = rel2.entityId === relatedEntity.id ? rel2.objectEntity : rel2.subjectEntity;
             const rel2Type = rel2.role || 'related_to';
 
@@ -1007,7 +1007,7 @@ Narrative:`;
         limit: 10
       });
 
-      for (const rel of relationships) {
+      for (const rel of relationships as EntityLinkWithEntities[]) {
         const relatedEntity = rel.entityId === entity.id ? rel.objectEntity : rel.subjectEntity;
         const relType = rel.role || 'related_to';
 

@@ -1,6 +1,6 @@
 import redis from '../queues/redis';
 import prisma from '../db';
-import { graphService } from './graph.service';
+import { graphService, EntityLinkWithEntities } from './graph.service';
 import { reasoningService } from './reasoning.service';
 
 interface CachedInsight {
@@ -62,7 +62,7 @@ class SmartCacheService {
     };
     
     if (needsGraph) {
-      const relationships = await graphService.getRelationships(userId, entity.id, { limit: 50 });
+      const relationships = await graphService.getRelationships(userId, entity.id, { limit: 50 }) as EntityLinkWithEntities[];
       insights.graph = {
         entity: entity.name,
         relationships: relationships.map(r => ({
