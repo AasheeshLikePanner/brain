@@ -16,7 +16,8 @@ import { memoryDeduplicationService } from './services/memory-deduplication.serv
 import { applyConfidenceDecay } from './jobs/confidence-decay.job';
 import { MemoryAssociationService } from './services/memory-association.service';
 import { ProactiveService } from './services/proactive.service';
-import { smartPrecomputeJob, cleanupCacheJob } from './jobs/smart-precompute.job';
+import { smartPrecomputeJob } from './jobs/smart-precompute.job';
+import { updateRelationshipMetadata } from './jobs/updateRelationshipMetadata.job';
 import { metricsController } from './controllers/metrics.controller';
 
 // New: Passport imports
@@ -204,15 +205,15 @@ app.listen(port, async () => {
     });
     console.log('Scheduled hourly smart pre-computation job.');
 
-    // Schedule cache cleanup (daily at 3 AM)
-    cron.schedule('0 3 * * *', async () => {
-      console.log('[Scheduler] Running cache cleanup job');
-      try {
-        await cleanupCacheJob();
-      } catch (error) {
-        console.error('[Scheduler] Cache cleanup job failed:', error);
-      }
+
+
+    // Schedule the relationship metadata update job to run at 1:00 AM every day
+    cron.schedule('0 1 * * *', () => {
+      console.log('\n---\nRunning scheduled job: updateRelationshipMetadata\n---');
+      updateRelationshipMetadata();
+    }, {
+      timezone: "America/New_York" // Example timezone
     });
-    console.log('Scheduled daily cache cleanup job.');
+    console.log('Scheduled daily relationship metadata update job.');
   }
 });

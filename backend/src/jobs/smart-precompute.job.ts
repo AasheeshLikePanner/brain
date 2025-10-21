@@ -57,7 +57,7 @@ export async function smartPrecomputeJob() {
 async function precomputeForUser(userId: string): Promise<number> {
   console.log(`[SmartPrecomputeJob] Processing user ${userId}`);
   
-  // Get popular entities for this user (from cache tracking)
+  // Get popular entities for this user
   const popularEntities = await smartCacheService.getPopularEntities(userId, 20);
   
   if (popularEntities.length === 0) {
@@ -69,7 +69,7 @@ async function precomputeForUser(userId: string): Promise<number> {
   
   let processed = 0;
   
-  for (const { entityId, entityName } of popularEntities) {
+  for (const { entityName } of popularEntities) {
     try {
       // Check if already cached
       const cached = await smartCacheService.getCachedInsights(entityName);
@@ -81,55 +81,8 @@ async function precomputeForUser(userId: string): Promise<number> {
       
       console.log(`[SmartPrecomputeJob] Computing insights for ${entityName}...`);
       
-      // Get entity details
-      const entity = await prisma.entity.findUnique({
-        where: { id: entityId }
-      });
-      
-      if (!entity) continue;
-
-      // Fetch memories related to this entity separately
-      const entityMemories = await prisma.memory.findMany({
-        where: {
-          userId,
-          deleted: false,
-          content: {
-            contains: entity.name, // Assuming memories contain the entity name
-            mode: 'insensitive'
-          }
-        },
-        orderBy: { createdAt: 'desc' },
-        take: 50
-      });
-      
-      // Compute graph
-      const relationships = await graphService.getRelationships(userId, entity.id);
-      const graph = {
-        entity: entity.name,
-        relationships: relationships.map(r => ({
-          subject: r.subjectEntity.name,
-          predicate: r.role || 'related to',
-          object: r.objectEntity?.name || 'unknown'
-        }))
-      };
-      
-      // Compute timeline if entity has memories
-      let timeline = null;
-      if (entityMemories.length > 0) {
-        timeline = await reasoningService.buildTimeline(userId, entity.name);
-      }
-      
-      // Cache the results
-      const insights = {
-        entityId: entity.id,
-        entityName: entity.name,
-        graph,
-        timeline,
-        cachedAt: Date.now()
-      };
-      
-      const cacheKey = `insights:${entityName.toLowerCase()}`;
-      await redis.setex(cacheKey, 3600, JSON.stringify(insights));
+      // Use the lazy compute and cache function to pre-compute the insights
+      await smartCacheService.lazyComputeAndCache(userId, entityName, true, true);
       
       console.log(`[SmartPrecomputeJob] Cached insights for ${entityName}`);
       processed++;
@@ -143,38 +96,4 @@ async function precomputeForUser(userId: string): Promise<number> {
   }
   
   return processed;
-}
-
-/**
- * Clean up old cache entries
- */
-export async function cleanupCacheJob() {
-  console.log('[CleanupCacheJob] Starting cache cleanup...');
-  
-  try {
-    // Redis automatically expires keys with TTL, but we can clean up tracking
-    const pattern = 'entity_usage:*';
-    const keys = await redis.keys(pattern);
-    
-    let cleaned = 0;
-    
-    for (const key of keys) {
-      const lastUsed = await redis.hget(key, 'lastUsed');
-      
-      if (lastUsed) {
-        const daysSinceUsed = (Date.now() - parseInt(lastUsed)) / (1000 * 60 * 60 * 24);
-        
-        // Remove tracking for entities not used in 30 days
-        if (daysSinceUsed > 30) {
-          await redis.del(key);
-          cleaned++;
-        }
-      }
-    }
-    
-    console.log(`[CleanupCacheJob] Cleaned up ${cleaned} old tracking entries`);
-    
-  } catch (error) {
-    console.error('[CleanupCacheJob] Error:', error);
-  }
 }

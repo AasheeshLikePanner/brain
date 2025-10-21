@@ -80,11 +80,16 @@ model Memory {
   accessCount       Int      @default(0)
   lastAccessedAt    DateTime @default(now())
   confidenceScore   Float    @default(1.0)  // For forgetting mechanism
-  
+  updatedAt         DateTime @updatedAt
+
   user              User        @relation(fields: [userId], references: [id], onDelete: Cascade)
   embeddings        Embedding[]
   entityLinks       EntityLink[]
 
+  @@index([userId])
+  @@index([recordedAt])
+  @@index([confidenceScore])
+  @@index([deleted])
   @@map("memories")
 }
 
@@ -121,15 +126,27 @@ model EntityLink {
   memoryId   String?   // Memory (optional, if linking to a memory)
   chatMessageId String? // NEW
   role       String?   // Predicate
-  confidence Float?
+  confidence Float     @default(0.7)
+  strength   Float     @default(0.5)
+  mentions   Int       @default(1)
+  firstSeen  DateTime  @default(now())
+  lastSeen   DateTime  @default(now())
+  status     String    @default("active") // "active" | "historical" | "deprecated"
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
   
   subjectEntity Entity @relation("SubjectLinks", fields: [entityId], references: [id], onDelete: Cascade)
   objectEntity  Entity? @relation("ObjectLinks", fields: [objectId], references: [id], onDelete: Cascade)
   memory        Memory? @relation(fields: [memoryId], references: [id], onDelete: Cascade)
   chatMessage   ChatMessage? @relation(fields: [chatMessageId], references: [id], onDelete: Cascade) // NEW
 
+  @@index([entityId])
+  @@index([objectId])
+  @@index([status])
+  @@index([lastSeen])
   @@map("entity_links")
 }
+
 
 model Summary {
   id              String    @id @default(uuid())

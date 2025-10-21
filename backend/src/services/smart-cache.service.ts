@@ -55,19 +55,6 @@ class SmartCacheService {
       };
     }
 
-    const entityMemories = await prisma.memory.findMany({
-      where: {
-        userId,
-        deleted: false,
-        content: {
-          contains: entity.name,
-          mode: 'insensitive'
-        }
-      },
-      orderBy: { createdAt: 'desc' },
-      take: 50
-    });
-    
     const insights: CachedInsight = {
       entityId: entity.id,
       entityName: entity.name,
@@ -75,7 +62,7 @@ class SmartCacheService {
     };
     
     if (needsGraph) {
-      const relationships = await graphService.getRelationships(userId, entity.id);
+      const relationships = await graphService.getRelationships(userId, entity.id, { limit: 50 });
       insights.graph = {
         entity: entity.name,
         relationships: relationships.map(r => ({
@@ -86,30 +73,14 @@ class SmartCacheService {
       };
     }
     
-    if (needsTimeline && entityMemories.length > 0) {
+    if (needsTimeline) {
       insights.timeline = await reasoningService.buildTimeline(userId, entity.name);
     }
     
     const cacheKey = `insights:${entityName.toLowerCase()}`;
     await redis.setex(cacheKey, this.CACHE_TTL, JSON.stringify(insights));
     
-    await this.trackEntityUsage(userId, entity.id, entityName);
-    
     return insights;
-  }
-  
-  private async trackEntityUsage(
-    userId: string,
-    entityId: string,
-    entityName: string
-  ): Promise<void> {
-    const trackingKey = `entity_usage:${userId}:${entityId}`;
-    
-    await redis.hincrby(trackingKey, 'count', 1);
-    await redis.hset(trackingKey, 'name', entityName);
-    await redis.hset(trackingKey, 'lastUsed', Date.now().toString());
-    
-    await redis.expire(trackingKey, 7 * 24 * 60 * 60);
   }
   
   async getPopularEntities(userId: string, limit: number = 20): Promise<Array<{
@@ -118,38 +89,16 @@ class SmartCacheService {
     usageCount: number;
   }>> {
     try {
-      const pattern = `entity_usage:${userId}:*`;
-      const keys = await redis.keys(pattern);
+      const centralEntities = await graphService.getCentralEntities(userId, limit);
       
-      if (keys.length === 0) return [];
+      return centralEntities.map(e => ({
+        entityId: e.entity.id,
+        entityName: e.entity.name,
+        usageCount: e.relationshipCount
+      }));
       
-      const entities = await Promise.all(
-        keys.map(async (key) => {
-          const data = await redis.hgetall(key);
-          const entityId = key.split(':')[2];
-          
-          return {
-            entityId,
-            entityName: data.name || '',
-            usageCount: parseInt(data.count || '0', 10),
-            lastUsed: parseInt(data.lastUsed || '0', 10)
-          };
-        })
-      );
-      
-      const popular = entities.filter(
-        e => e.usageCount >= this.POPULAR_ENTITY_THRESHOLD
-      );
-      
-      popular.sort((a, b) => {
-        if (b.usageCount !== a.usageCount) {
-          return b.usageCount - a.usageCount;
-        }
-        return b.lastUsed - a.lastUsed;
-      });
-      
-      return popular.slice(0, limit);
     } catch (error) {
+      console.error('Error getting popular entities:', error);
       return [];
     }
   }
