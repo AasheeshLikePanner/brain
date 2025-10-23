@@ -1,6 +1,7 @@
 import redis from '../queues/redis';
 import prisma from '../db';
 import { llmService } from './llm.service';
+import { HierarchicalNSW } from 'hnswlib-node'; // Import HNSW library
 
 interface InstantResponse {
   pattern: RegExp;
@@ -8,6 +9,62 @@ interface InstantResponse {
 }
 
 class InstantResponseService {
+  private hnswIndex: HierarchicalNSW; // Declare HNSW instance
+  private inMemoryCache = new Map<string, { response: string, expires: number }>(); // In-memory cache
+  private idMap = new Map<string, number>(); // Map string cacheId to numeric ID
+  private reverseIdMap = new Map<number, string>(); // Map numeric ID back to string cacheId
+  private nextNumericId = 0; // Counter for generating numeric IDs
+  private patterns: InstantResponse[] = [
+    // Greetings
+    {
+      pattern: /^(hi|hello|hey|sup|yo)$/i,
+      handler: async () => "Hi! How can I help you today?"
+    },
+    
+    // Thanks
+    {
+      pattern: /^(thanks|thank you|thx)$/i,
+      handler: async () => "You're welcome! 😊"
+    },
+    
+    // Personal info queries - DIRECT MEMORY LOOKUP
+    {
+      pattern: /what('s| is) my name/i,
+      handler: async (_, userId) => {
+        return await this.getFactFromMemory(userId, ['name is', 'my name', 'called']);
+      }
+    },
+    
+    {     
+      pattern: /who is my (brother|sister|mother|father|son|daughter)/i,
+      handler: async (match, userId) => {
+        const relation = match[1];
+        return await this.getFactFromMemory(userId, [relation, `${relation} is`, `${relation}'s name`]);
+      }
+    },
+    
+    {
+      pattern: /what is my (job|role|position|title)/i,
+      handler: async (_, userId) => {
+        return await this.getFactFromMemory(userId, ['work as', 'job is', 'role is', 'position is']);
+      }
+    },
+    
+    {
+      pattern: /where do i (work|live)/i,
+      handler: async (match, userId) => {
+        const type = match[1];
+        return await this.getFactFromMemory(userId, [type === 'work' ? 'work at' : 'live in', type]);
+      }
+    },
+  ];
+
+  constructor() {
+    const numDimensions = 768; // Embedding size
+    const maxElements = 10000; // Max number of elements in the index
+    this.hnswIndex = new HierarchicalNSW('cosine', numDimensions); // Use cosine distance
+    this.hnswIndex.initIndex(maxElements);
+  }
   
   /**
    * Try to answer WITHOUT calling LLM
@@ -17,56 +74,8 @@ class InstantResponseService {
     console.time('instantResponseService.tryInstantResponse');
     const lowerQuery = query.toLowerCase().trim();
     
-    // ══════════════════════════════════════════════════════════
-    // 1. EXACT PATTERN MATCHING (< 1ms)
-    // ══════════════════════════════════════════════════════════
-    const patterns: InstantResponse[] = [
-      // Greetings
-      {
-        pattern: /^(hi|hello|hey|sup|yo)$/i,
-        handler: async () => "Hi! How can I help you today?"
-      },
-      
-      // Thanks
-      {
-        pattern: /^(thanks|thank you|thx)$/i,
-        handler: async () => "You're welcome! 😊"
-      },
-      
-      // Personal info queries - DIRECT MEMORY LOOKUP
-      {
-        pattern: /what('s| is) my name/i,
-        handler: async (_, userId) => {
-          return await this.getFactFromMemory(userId, ['name is', 'my name', 'called']);
-        }
-      },
-      
-      {
-        pattern: /who is my (brother|sister|mother|father|son|daughter)/i,
-        handler: async (match, userId) => {
-          const relation = match[1];
-          return await this.getFactFromMemory(userId, [relation, `${relation} is`, `${relation}'s name`]);
-        }
-      },
-      
-      {
-        pattern: /what is my (job|role|position|title)/i,
-        handler: async (_, userId) => {
-          return await this.getFactFromMemory(userId, ['work as', 'job is', 'role is', 'position is']);
-        }
-      },
-      
-      {
-        pattern: /where do i (work|live)/i,
-        handler: async (match, userId) => {
-          const type = match[1];
-          return await this.getFactFromMemory(userId, [type === 'work' ? 'work at' : 'live in', type]);
-        }
-      },
-    ];
-    
-    // Try each pattern
-    for (const { pattern, handler } of patterns) {
+    // TIER 1: EXACT PATTERN MATCHING (< 1ms)
+    for (const { pattern, handler } of this.patterns) {
       const match = query.match(pattern);
       if (match) {
         console.log('[InstantResponse] Pattern matched, generating instant response');
@@ -77,30 +86,31 @@ class InstantResponseService {
       }
     }
     
-    // ══════════════════════════════════════════════════════════
-    // 2. EXACT CACHE CHECK (very fast)
-    // ══════════════════════════════════════════════════════════
-    const exactCachedResponse = await this.findExact(userId, query);
-    if (exactCachedResponse) {
-      console.log('[InstantResponse] Exact cache HIT, returning immediately');
+    // TIER 2: IN-MEMORY EXACT CACHE (~0.1ms)
+    const inMemoryExactResponse = this.getExactFromInMemoryCache(query);
+    if (inMemoryExactResponse) {
+      console.log('[InstantResponse] In-memory exact cache HIT, returning immediately');
       console.timeEnd('instantResponseService.tryInstantResponse');
-      return exactCachedResponse;
+      return inMemoryExactResponse;
     }
 
-    // ══════════════════════════════════════════════════════════
-    // 3. SEMANTIC CACHE CHECK (50ms)
-    // ══════════════════════════════════════════════════════════
-    const cachedResponse = await this.checkSemanticCache(userId, query);
-    if (cachedResponse) {
+    // TIER 3: REDIS EXACT CACHE (~1ms)
+    const redisExactResponse = await this.findExact(userId, query);
+    if (redisExactResponse) {
+      console.log('[InstantResponse] Redis exact cache HIT, returning immediately');
+      console.timeEnd('instantResponseService.tryInstantResponse');
+      return redisExactResponse;
+    }
+
+    // TIER 4: LSH-BASED SEMANTIC CACHE (~20ms)
+    const semanticCachedResponse = await this.checkSemanticCache(userId, query);
+    if (semanticCachedResponse) {
       console.log('[InstantResponse] Semantic cache HIT');
       console.timeEnd('instantResponseService.tryInstantResponse');
-      return cachedResponse;
+      return semanticCachedResponse;
     }
     
-    // ══════════════════════════════════════════════════════════
-    // 4. DIRECT FACT LOOKUP (100ms)
-    // For "what is X" queries, try to find exact memory
-    // ══════════════════════════════════════════════════════════
+    // TIER 5: DIRECT FACT LOOKUP (100ms)
     if (/^what (is|are|was|were)/i.test(query)) {
       const directAnswer = await this.tryDirectFactLookup(userId, query);
       if (directAnswer) {
@@ -109,14 +119,20 @@ class InstantResponseService {
       }
     }
     
-    // ══════════════════════════════════════════════════════════
-    // 4. NO INSTANT RESPONSE AVAILABLE - NEED LLM
-    // ══════════════════════════════════════════════════════════
+    // NO INSTANT RESPONSE AVAILABLE - NEED LLM
     console.log('[InstantResponse] No instant response available, needs LLM');
     console.timeEnd('instantResponseService.tryInstantResponse');
     return null;
   }
   
+  private getExactFromInMemoryCache(query: string): string | null {
+    const cached = this.inMemoryCache.get(query);
+    if (cached && cached.expires > Date.now()) {
+      return cached.response;
+    }
+    return null;
+  }
+
   /**
    * Get specific fact from memories (direct text search)
    * NO embedding, NO LLM - pure SQL search
@@ -273,34 +289,50 @@ class InstantResponseService {
   ): Promise<string | null> {
     console.time('instantResponseService.checkSemanticCache');
     try {
-      const cacheKey = `query_cache:${userId}`;
-      const cached = await redis.lrange(cacheKey, 0, 50);
-      
-      if (cached.length === 0) {
-        console.timeEnd('instantResponseService.checkSemanticCache');
-        return null;
-      }
-      
       // Generate embedding for query
       console.time('llmService.createEmbedding (semantic cache)');
       const queryEmbedding = await llmService.createEmbedding(query);
       console.timeEnd('llmService.createEmbedding (semantic cache)');
       
-      // Check similarity with cached queries
-      for (const item of cached) {
-        const data = JSON.parse(item);
-        const similarity = this.cosineSimilarity(queryEmbedding, data.embedding);
+      // Query HNSW index for approximate nearest neighbors
+      const numNeighbors = 5; // Number of neighbors to retrieve from HNSW
+      const hnswResults = this.hnswIndex.searchKnn(queryEmbedding, numNeighbors);
+      
+      if (hnswResults.neighbors.length === 0) {
+        console.timeEnd('instantResponseService.checkSemanticCache');
+        return null;
+      }
+      
+      let bestMatch: string | null = null;
+      let bestSimilarity = 0.0;
+      
+      for (let i = 0; i < hnswResults.neighbors.length; i++) {
+        const numericId = hnswResults.neighbors[i];
+        const cacheId = this.reverseIdMap.get(numericId); // Get original string ID
+
+        if (!cacheId) continue; // Should not happen if mapping is consistent
+
+        const cacheKey = `query_cache:${cacheId}`;
+        const cachedData = await redis.get(cacheKey);
         
-        // 85% similarity threshold
-        if (similarity >= 0.85) {
-          console.log(`[InstantResponse] Cache hit with ${(similarity * 100).toFixed(1)}% similarity`);
-          console.timeEnd('instantResponseService.checkSemanticCache');
-          return data.response;
+        if (cachedData) {
+          const data = JSON.parse(cachedData);
+          // Re-calculate cosine similarity for precise ranking
+          const similarity = this.cosineSimilarity(queryEmbedding, data.embedding);
+          
+          // 85% similarity threshold
+          if (similarity >= 0.85 && similarity > bestSimilarity) {
+            bestSimilarity = similarity;
+            bestMatch = data.response;
+          }
         }
       }
       
+      if (bestMatch) {
+        console.log(`[InstantResponse] Cache hit with ${(bestSimilarity * 100).toFixed(1)}% similarity`);
+      }
       console.timeEnd('instantResponseService.checkSemanticCache');
-      return null;
+      return bestMatch;
     } catch (error) {
       console.error('[InstantResponse] Error checking semantic cache:', error);
       console.timeEnd('instantResponseService.checkSemanticCache');
@@ -329,17 +361,33 @@ class InstantResponseService {
       const queryEmbedding = await llmService.createEmbedding(query);
       console.timeEnd('llmService.createEmbedding (cacheResponse)');
       
+      const cacheId = `${userId}:${query}`; // Unique string ID for this cache entry
+
+      // Get or create numeric ID for HNSW
+      let numericId = this.idMap.get(cacheId);
+      if (numericId === undefined) {
+        numericId = this.nextNumericId++;
+        this.idMap.set(cacheId, numericId);
+        this.reverseIdMap.set(numericId, cacheId);
+        this.hnswIndex.resizeIndex(this.hnswIndex.getCurrentCount() + 1); // Resize if needed
+      }
+
+      // Add to HNSW index
+      this.hnswIndex.addPoint(queryEmbedding, numericId);
+      
       const cacheData = JSON.stringify({
         query,
-        embedding: queryEmbedding,
+        embedding: queryEmbedding, // Store embedding for re-ranking
         response,
         timestamp: Date.now()
       });
       
-      const cacheKey = `query_cache:${userId}`;
-      await redis.lpush(cacheKey, cacheData);
-      await redis.ltrim(cacheKey, 0, 49); // Keep last 50
-      await redis.expire(cacheKey, 7200); // 2 hours
+      const cacheKey = `query_cache:${cacheId}`;
+      await redis.setex(cacheKey, 7200, cacheData); // 2 hours
+
+      // Update in-memory cache
+      this.inMemoryCache.set(query, { response, expires: Date.now() + 3600000 }); // 1 hour expiry
+
       console.timeEnd('instantResponseService.cacheResponse');
     } catch (error) {
       console.error('[InstantResponse] Error caching response:', error);

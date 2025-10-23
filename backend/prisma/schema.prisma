@@ -58,6 +58,7 @@ model ChatMessage {
   createdAt DateTime @default(now())
   isTripletExtracted Boolean @default(false)
   entityLinks EntityLink[]
+  metadata  Json? // New: To store stream-related metadata
 
   @@map("chat_messages")
 }

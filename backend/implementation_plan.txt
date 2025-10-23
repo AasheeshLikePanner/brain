@@ -1,0 +1,117 @@
+# Implementation Plan for System Improvements
+
+## Project Goal
+To significantly enhance the system's performance, accuracy, and resilience by implementing a series of targeted improvements across query analysis, memory management, caching, LLM interactions, and stream handling.
+
+## Implementation Strategy
+Improvements will be addressed systematically, one by one, following the priority order outlined below. Each improvement will involve specific code changes and, where applicable, new dependencies or database modifications.
+
+---
+
+## 🚀 Improvement #1: Query Analysis Enhancement (Priority: ⭐⭐⭐⭐⭐ HIGH)
+
+### Goal
+Improve query classification accuracy and entity extraction to better inform subsequent processing steps, leading to more relevant and accurate responses.
+
+### Steps
+1.  **Install `compromise.js`:**
+    *   Add `compromise` to `package.json` and install it.
+2.  **Integrate `compromise.js` for improved entity extraction:**
+    *   Modify `src/services/query-analyzer.service.ts` to replace existing regex-based entity extraction with `compromise.js`'s NLP capabilities (`doc.people()`, `doc.places()`, `doc.organizations()`, `doc.topics()`).
+3.  **Refine `analyzeQuery` for hybrid approach:**
+    *   In `src/services/query-analyzer.service.ts`, ensure the `analyzeQuery` function first attempts fast regex pattern matching for obvious cases.
+    *   For queries that don't yield a strong match from regex, integrate a placeholder for a lightweight NLU model (e.g., a simple intent classifier using `compromise`'s tagging or a small pre-trained model if introduced later) to determine intent and type. (Initial implementation will focus on `compromise` for entities and existing regex for types, with a note for future NLU model integration).
+4.  **Implement a mechanism to store successful classifications (Future/Optional):**
+    *   Consider adding a new Prisma model or using Redis to store `(query, queryAnalysisResult)` pairs that lead to positive user feedback. This data can be used to refine patterns or train a lightweight NLU model over time. (This step is deferred for now but noted for future work).
+
+---
+
+## 🚀 Improvement #2: Memory Search Optimization (Priority: ⭐⭐⭐⭐⭐ HIGH)
+
+### Goal
+Significantly speed up memory search by consolidating vector and full-text search into a single, optimized PostgreSQL query, reducing database round trips and improving scoring accuracy.
+
+### Steps
+1.  **Create `hybrid_memory_search` PostgreSQL function:**
+    *   Write the SQL script for the `hybrid_memory_search` function as provided in the prompt.
+    *   Execute this script against the PostgreSQL database (e.g., via a Prisma migration or direct SQL execution).
+2.  **Modify `memoryIndexService.searchMemories`:**
+    *   In `src/services/memory-index.service.ts`, update the `searchMemories` function to call the new `hybrid_memory_search` PostgreSQL function using `prisma.$queryRaw`.
+    *   Ensure the `queryEmbedding`, `query`, `limit`, and `contextEntities` parameters are correctly passed to the SQL function.
+    *   Remove the separate `vectorSearch` and `fullTextSearch` calls and their subsequent combination logic.
+3.  **Update `trackMemoryAccess` call:**
+    *   Ensure `this.trackMemoryAccess` is called with the `id`s from the results of the `hybrid_memory_search` function.
+4.  **(Optional) Implement Materialized View for Hot Memories (Future):**
+    *   Create the `hot_memories` materialized view and its associated indexes.
+    *   Modify `memoryIndexService.searchMemories` to first query `hot_memories` and fall back to `hybrid_memory_search` if insufficient results are found. (This step is deferred for now but noted for future work).
+
+---
+
+## 🚀 Improvement #3: Instant Response Cache Optimization (Priority: ⭐⭐⭐⭐ MEDIUM-HIGH)
+
+### Goal
+Drastically improve instant response cache lookup speed and hit rates by implementing Locality-Sensitive Hashing (LSH) and a multi-tier caching strategy.
+
+### Steps
+1.  **Install `lsh-js` (or similar):**
+    *   Add `lsh-js` to `package.json` and install it.
+2.  **Integrate LSH into `instantResponseService`:**
+    *   In `src/services/instant-response.service.ts`, initialize `RandomProjection` in the constructor.
+    *   Modify `cacheResponse` to hash the query embedding using LSH and store the cache data in Redis using the hash as part of the key (e.g., `redis.hset`).
+    *   Modify `checkSemanticCache` to first hash the incoming query embedding, then retrieve candidates from the corresponding hash bucket in Redis, and finally perform cosine similarity only on these candidates.
+3.  **Implement multi-tier caching:**
+    *   Add an in-memory cache (`Map`) to `instantResponseService` for the fastest exact matches.
+    *   Adjust `tryInstantResponse` to check caches in a hierarchical order:
+        1.  Pattern matching (existing).
+        2.  In-memory exact cache.
+        3.  LSH-based semantic cache (Redis).
+        4.  Direct fact lookup (existing).
+4.  **Implement cache warming (Future):**
+    *   Create a function to preload frequently used queries into the in-memory cache on server startup. (This step is deferred for now but noted for future work).
+
+---
+
+## 🚀 Improvement #4: LLM Call Batching & Deduplication (Priority: ⭐⭐⭐⭐ MEDIUM-HIGH)
+
+### Goal
+Reduce redundant LLM API calls and accelerate embedding generation through request deduplication and batching.
+
+### Steps
+1.  **Implement promise deduplication:**
+    *   In `src/services/llm.service.ts`, add `pendingEmbeddings` and `pendingCompletions` Maps.
+    *   Modify `createEmbedding` and `generateCompletion` to check these Maps for ongoing requests for the same input and return the existing Promise if found.
+    *   Ensure Promises are removed from the Maps upon resolution or rejection.
+2.  **Implement batching for embedding requests:**
+    *   In `src/services/llm.service.ts`, create an `embeddingQueue` and a `batchTimer`.
+    *   Modify `createEmbedding` to add requests to the queue and trigger batch processing after a short delay or when the queue reaches a certain size.
+    *   Implement `processBatch` to make a single API call to Ollama for multiple embeddings.
+3.  **Add Redis caching for embeddings:**
+    *   Implement `getEmbeddingFromCache` and `cacheEmbedding` methods in `llm.service.ts` to store and retrieve embeddings from Redis, further reducing LLM calls.
+
+---
+
+## 🚀 Improvement #5: Stream Error Handling & Recovery (Priority: ⭐⭐⭐⭐⭐ CRITICAL)
+
+### Goal
+Prevent data loss, improve user experience during stream failures, and provide better debugging capabilities.
+
+### Steps
+1.  **Modify `streamChatResponse` in `src/services/chat.service.ts`:**
+    *   Generate a `streamId` (e.g., using `uuidv4`).
+    *   Create an assistant message placeholder in `prisma.chatMessage` with an initial `status: 'streaming'` and `streamId` in its metadata.
+2.  **Implement progressive saving:**
+    *   Introduce `fullResponseText` and `lastSavedLength` variables.
+    *   Set up a `setInterval` to periodically call a `saveProgress` helper function.
+    *   The `saveProgress` function will update the `content` and `metadata` (e.g., `lastUpdatedAt`) of the assistant message in `Prisma`.
+3.  **Implement robust error handling and final status updates:**
+    *   In the `TransformStream`'s `flush` method:
+        *   Clear the periodic `saveTimer`.
+        *   Perform a final update to `prisma.chatMessage` with the complete `fullResponseText` and `status: 'completed'`.
+        *   Handle errors during finalization, updating the message status to `failed` with error details.
+    *   Add a `.catch()` block to the `llmStream.pipeThrough(transformStream)` chain to handle stream errors. In case of an error, update the assistant message status to `interrupted` and save any `fullResponseText` accumulated so far.
+4.  **Update `memoryQueue.add` call:**
+    *   Ensure the `memoryQueue.add` call includes the `streamId` in its job data and has error handling.
+
+---
+
+This plan provides a structured approach to implementing the suggested improvements. We will tackle them in the specified order, ensuring each change is thoroughly tested before moving to the next.

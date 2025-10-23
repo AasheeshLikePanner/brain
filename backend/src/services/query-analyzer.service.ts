@@ -1,3 +1,5 @@
+import nlp from 'compromise';
+
 export interface QueryAnalysis {
   isComplex: boolean;
   isFactual: boolean;
@@ -89,37 +91,32 @@ class QueryAnalyzerService {
   }
 
   /**
-   * Extract entities (handles capitalized, lowercase, hashtags, and quoted text)
+   * Extract entities using compromise.js
    */
   private extractEntities(query: string): string[] {
-    const entities: string[] = [];
+    const doc = nlp(query);
+    
+    const extracted: string[] = [
+      ...doc.people().out('array'),
+      ...doc.places().out('array'),
+      ...doc.organizations().out('array'),
+      ...doc.topics().out('array'),
+    ];
 
-    // Quoted strings
+    // Also include quoted strings and hashtags if they are not caught by compromise
     const quoted = query.match(/"([^"]+)"|'([^']+)'/g) || [];
-    entities.push(...quoted.map(q => q.replace(/['"]+/g, '')));
+    extracted.push(...quoted.map(q => q.replace(/['"]+/g, '')));
 
-    // Hashtags
     const hashtags = query.match(/#\w+/g) || [];
-    entities.push(...hashtags.map(h => h.slice(1)));
+    extracted.push(...hashtags.map(h => h.slice(1)));
 
-    // Capitalized or title-cased phrases
-    const caps = query.match(/\b[A-Z][a-z]+(?:\s[A-Z][a-z]+)*\b/g) || [];
-    entities.push(...caps);
-
-    // Common noun phrases (two+ lowercase words)
-    const nounPhrases = query.match(/\b[a-z]+(?:\s[a-z]+){1,2}\b/g) || [];
-    const topicKeywords = nounPhrases?.filter(p =>
-      /(ai|machine learning|neural network|space|economy|health|music|history|climate)/i.test(p)
-    ) || [];
-    entities.push(...topicKeywords);
-
-    // Deduplicate and filter stop words
+    // Deduplicate and filter stop words (compromise might handle some of this, but good to have a final pass)
     const stopWords = new Set([
       'I', 'The', 'A', 'An', 'This', 'That', 'My', 'Your', 'What', 'We',
       'They', 'He', 'She', 'It', 'Could', 'Should', 'Would', 'Can', 'May',
       'Will', 'Do', 'Does', 'Did', 'Of', 'In', 'To', 'On', 'At', 'For'
     ]);
-    const unique = [...new Set(entities.map(e => e.trim()))].filter(e => e && !stopWords.has(e));
+    const unique = [...new Set(extracted.map(e => e.trim()))].filter(e => e && !stopWords.has(e));
 
     return unique;
   }

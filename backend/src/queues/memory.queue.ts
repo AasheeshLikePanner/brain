@@ -8,6 +8,7 @@ export interface MemoryExtractionJob {
   chatId: string;
   userMessage: string;
   assistantMessage: string;
+  streamId?: string; // New: Optional stream ID for tracking
 }
 
 // Initialize the queue

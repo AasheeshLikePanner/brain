@@ -1,3 +1,4 @@
+import { v4 as uuidv4 } from 'uuid';
 import prisma from '../db';
 import { llmService } from './llm.service';
 import { memoryService } from './memory.service';
@@ -8,7 +9,7 @@ import { memoryQueue } from '../queues/memory.queue';
 import { ReasoningService } from './reasoning.service';
 import { queryAnalyzerService, QueryAnalysis } from './query-analyzer.service';
 import { smartCacheService } from './smart-cache.service';
-import { metricsService } from './metrics.service';
+import { metricsService } from '././metrics.service';
 import { instantResponseService } from './instant-response.service'; // NEW
 
 class ChatService {
@@ -35,11 +36,29 @@ class ChatService {
   ): Promise<ReadableStream<Uint8Array>> {
     const startTime = Date.now();
     console.log('[ChatService] Starting streamChatResponse');
+    const streamId = uuidv4(); // Unique ID for this stream
 
-    // Step 1: Save user message and analyze query in parallel
-    const saveMessagePromise = prisma.chatMessage.create({
+    // Save user message immediately
+    const userMsg = await prisma.chatMessage.create({
       data: { chatId, role: 'user', content: message }
     });
+    
+    // Create assistant message placeholder
+    const assistantMsg = await prisma.chatMessage.create({
+      data: { 
+        chatId, 
+        role: 'assistant', 
+        content: '', // Empty initially
+        metadata: { 
+          streamId, 
+          status: 'streaming',
+          startedAt: new Date().toISOString()
+        }
+      }
+    });
+
+    // Step 1: Save user message and analyze query in parallel
+    const saveMessagePromise = Promise.resolve(userMsg); // User message already saved
     const queryAnalysis = queryAnalyzerService.analyzeQuery(message);
 
     const queryAnalysisResult = queryAnalysis;
@@ -160,49 +179,158 @@ class ChatService {
 
     // Step 7: Stream the response from the LLM
     const llmStream = await llmService.generateCompletionStream(systemPrompt, userPrompt);
-
+    
     let fullResponseText = '';
-    const transformStream = new TransformStream({
-      transform(chunk, controller) {
-        const jsonString = new TextDecoder().decode(chunk);
-        // Groq sends data chunks that might contain multiple JSON objects
-        // separated by 'data: '. We need to handle this.
-        const dataLines = jsonString.split('\n').filter(line => line.startsWith('data: '));
+    let lastSavedLength = 0;
+    let saveTimer: NodeJS.Timeout | null = null;
 
-        for (const line of dataLines) {
-          const jsonStr = line.substring(5); // Remove 'data: '
-          if (jsonStr.trim() === '[DONE]') {
-            return;
-          }
-          try {
-            const parsed = JSON.parse(jsonStr);
-            const delta = parsed.choices[0]?.delta?.content;
-            if (delta) {
-              fullResponseText += delta;
+    // Helper: Progressive saving
+    const saveProgress = async (force = false) => {
+      if (!force && fullResponseText.length - lastSavedLength < 100) {
+        return; // Don't save too frequently
+      }
+      
+      try {
+        await prisma.chatMessage.update({
+          where: { id: assistantMsg.id },
+          data: { 
+            content: fullResponseText,
+            metadata: {
+              streamId, 
+              status: 'streaming',
+              lastUpdatedAt: new Date().toISOString()
             }
-          } catch (e) {
-            console.warn('Could not parse JSON chunk from Groq stream:', jsonStr);
           }
-        }
-        // We still pass the original chunk through so the client can handle it if needed,
-        // but our primary goal is to assemble the full text for saving.
-        controller.enqueue(chunk);
-      },
-      async flush(controller) {
-        console.log('[ChatService] Stream flushed. Saving full response.');
-        await prisma.chatMessage.create({
-          data: { chatId, role: 'assistant', content: fullResponseText },
         });
-        memoryQueue.add('extract', {
-          userId,
-          chatId,
-          userMessage: message,
-          assistantMessage: fullResponseText,
-        });
-      },
-    });
+        lastSavedLength = fullResponseText.length;
+        console.log(`[Stream ${streamId}] Progress saved: ${lastSavedLength} chars`);
+      } catch (error) {
+        console.error(`[Stream ${streamId}] Failed to save progress:`, error);
+        // Don't throw - continue streaming
+      }
+    };
 
-    return llmStream.pipeThrough(transformStream);
+    const transformStream = new TransformStream({
+      start(controller) {
+        // Set up periodic saving
+        saveTimer = setInterval(() => saveProgress(), 5000); // Save every 5s
+      },
+      
+      transform(chunk, controller) {
+        try {
+          const jsonString = new TextDecoder().decode(chunk);
+          const dataLines = jsonString
+            .split('\n')
+            .filter(line => line.startsWith('data: '));
+
+          for (const line of dataLines) {
+            const jsonStr = line.substring(6); // Remove 'data: '
+            if (jsonStr.trim() === '[DONE]') {
+              continue;
+            }
+            
+            try {
+              const parsed = JSON.parse(jsonStr);
+              const delta = parsed.choices[0]?.delta?.content;
+              if (delta) {
+                fullResponseText += delta;
+              }
+            } catch (e) {
+              console.warn(`[Stream ${streamId}] Could not parse chunk:`, jsonStr);
+            }
+          }
+          
+          controller.enqueue(chunk);
+        } catch (error) {
+          console.error(`[Stream ${streamId}] Transform error:`, error);
+          controller.error(error);
+        }
+      },
+      
+      async flush(controller) {
+        // Clear periodic saving
+        if (saveTimer) {
+          clearInterval(saveTimer);
+        }
+        
+        console.log(`[Stream ${streamId}] Stream completed. Finalizing...`);
+        
+        try {
+          // Final save with complete status
+          await prisma.chatMessage.update({
+            where: { id: assistantMsg.id },
+            data: { 
+              content: fullResponseText,
+              metadata: {
+                streamId,
+                status: 'completed',
+                completedAt: new Date().toISOString(),
+                duration: Date.now() - startTime
+              }
+            }
+          });
+          
+          console.log(`[Stream ${streamId}] Response saved successfully`);
+          
+          // Queue memory extraction (fire and forget with error handling)
+          memoryQueue.add('extract', {
+            userId,
+            chatId,
+            userMessage: message,
+            assistantMessage: fullResponseText,
+            streamId
+          }).catch(error => {
+            console.error(`[Stream ${streamId}] Failed to queue memory extraction:`, error);
+            // Could add to dead letter queue here
+          });
+          
+        } catch (error) {
+          console.error(`[Stream ${streamId}] Failed to finalize:`, error);
+          
+          // Mark as failed but keep content
+          await prisma.chatMessage.update({
+            where: { id: assistantMsg.id },
+            data: {
+              content: fullResponseText,
+              metadata: {
+                streamId,
+                status: 'failed',
+                error: (error as Error).message,
+                failedAt: new Date().toISOString()
+              }
+            }
+          }).catch(e => {
+            console.error(`[Stream ${streamId}] Critical: Could not save failed state:`, e);
+          });
+        }
+      }
+    });
+    
+    try {
+      const finalStream = llmStream.pipeThrough(transformStream);
+
+      // Return the final stream
+      return finalStream;
+    } catch (error) {
+      console.error(`[Stream ${streamId}] Stream error:`, error);
+      
+      // Try to save what we have
+      if (fullResponseText) {
+        prisma.chatMessage.update({
+          where: { id: assistantMsg.id },
+          data: {
+            content: fullResponseText + '\n\n[Stream interrupted]',
+            metadata: {
+              streamId,
+              status: 'interrupted',
+              error: (error as Error).message
+            }
+          }
+        }).catch(e => console.error('Failed to save interrupted stream:', e));
+      }
+      
+      throw error;
+    }
   }
 
   public async getChatHistory(chatId: string, userId: string, limit: number = 3) {
