@@ -153,10 +153,7 @@ class MemoryExtractorService {
   
   Return a JSON array of these memory objects. If no distinct memories are found, return an empty array.
   
-  Conversation:
-  ${content}
-  
-  Memories (JSON array):`;
+  Conversation:\n  ${content}\n\n  Memories (JSON array):`;
   
       try {
         const llmResponse = await llmService.generateCompletion(prompt);

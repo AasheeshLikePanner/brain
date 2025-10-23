@@ -1,0 +1,180 @@
+# Architecture Flow: POST /:chatId/message
+
+This document outlines the architecture and detailed execution flow for the `POST /:chatId/message` endpoint, which handles streaming chat responses, including query analysis, instant responses, advanced reasoning, and asynchronous memory processing.
+
+## 1. Overall Architecture Diagram (High-Level)
+
+```
++-------------------+     +-------------------+     +-------------------+
+|   User Client     | <-> |   API Gateway     | <-> |   Express App     |
+| (Browser/App)     |     | (Nginx/Load Bal.) |     | (Routes/Midware)  |
++-------------------+     +-------------------+     +-------------------+
+                                   |
+                                   v
+                          +-------------------+
+                          |  Chat Controller  |
+                          +-------------------+
+                                   |
+                                   v
+                          +-------------------+
+                          |   Chat Service    |
+                          +-------------------+
+                                   |
+      +-----------------------------------------------------------------+
+      |                                                                 |
+      v                                                                 v
++-------------------+     +-------------------+     +-------------------+
+| Query Analyzer    |     | Memory Indexer    |     | Reasoning Service |
+| (Simple/Complex)  |     | (Hybrid Search)   |     | (Implications/Graph)|
++-------------------+     +-------------------+     +-------------------+
+      |                         |                         |
+      v                         v                         v
++-------------------+     +-------------------+     +-------------------+
+| Instant Response  |     |   LLM Service     |     |   Graph Service   |
+| (Cache/Patterns)  |     | (Embeddings/Completions)| (Entity/Relations)  |
++-------------------+     +-------------------+     +-------------------+
+      |                         |                         |
+      v                         v                         v
++-------------------+     +-------------------+     +-------------------+
+|   Redis Cache     |     |   Prisma ORM      |     |   PostgreSQL DB   |
++-------------------+     +-------------------+     +-------------------+
+                                   |
+                                   v
+                          +-------------------+
+                          |   Memory Queue    |
+                          | (BullMQ + Redis)  |
+                          +-------------------+
+                                   |
+                                   v
+                          +-------------------+
+                          |   Memory Worker   |
+                          +-------------------+
+                                   |
+                                   v
+                          +-------------------+
+                          | Memory Extractor  |
+                          | (LLM/Contradiction)|
+                          +-------------------+
+```
+
+## 2. Detailed Flow of `POST /:chatId/message`
+
+This endpoint handles a user sending a message within a specific chat session. It's designed to provide a streaming response, potentially leveraging instant answers or advanced reasoning.
+
+1.  **Request Reception (`src/api/routes/chat.routes.ts`)**
+    *   The Express router receives a `POST` request to `/:chatId/message`.
+    *   It first passes through the `isAuthenticated` middleware.
+
+2.  **Authentication (`src/middleware/auth.middleware.ts`)**
+    *   `isAuthenticated` middleware:
+        *   Extracts the JWT token from the `Authorization` header.
+        *   Calls `jwt.utils.verifyToken` to validate the token and extract `userId`.
+        *   Fetches the `User` from `Prisma` using the `userId`.
+        *   If successful, attaches the `user` object to the `req` object (`req.user`) and calls `next()`.
+        *   If authentication fails at any step, it sends a `401 Unauthorized` response.
+
+3.  **Controller Handling (`src/controllers/chat.controller.ts`)**
+    *   `chatController.streamMessage` is invoked:
+        *   Extracts `chatId` from `req.params` and `message` from `req.body`.
+        *   Retrieves `userId` from `req.user`.
+        *   Calls `chatService.streamChatResponse(chatId, userId, message)`.
+        *   Sets `Content-Type` header to `application/octet-stream` for streaming.
+        *   Pipes the `ReadableStream` returned by `chatService` directly to the HTTP response, ensuring a real-time, chunked delivery to the client.
+
+4.  **Core Chat Service Logic (`src/services/chat.service.ts`)**
+    *   `chatService.streamChatResponse(chatId, userId, message)`:
+        *   **Step 1: Save User Message & Analyze Query (Parallel)**
+            *   `prisma.chatMessage.create`: Asynchronously saves the user's message to the database.
+            *   `queryAnalyzerService.analyzeQuery(message)`: Synchronously analyzes the user's message to determine its complexity, type (factual, timeline, relationship, etc.), and extracts entities. This result (`queryAnalysis`) is crucial for subsequent decisions.
+        *   **Step 2: Instant Response Strategy (Conditional)**
+            *   **If `queryAnalysis.isFactual` and `queryAnalysis.confidence > 0.8`:**
+                *   `instantResponseService.tryInstantResponse(userId, message)` is called. This attempts to find a quick answer using:
+                    *   Predefined regex patterns (greetings, common questions).
+                    *   Exact query matches in a Redis cache.
+                    *   Semantic similarity checks against cached queries (using LLM embeddings).
+                    *   Direct fact lookups in `Prisma` memories for "what is X" type questions.
+                *   If `instantResponse` is found, the user's message is ensured to be saved, the assistant's response is saved to `Prisma`, and the `instantResponse` is immediately streamed back to the client, bypassing further LLM calls.
+        *   **Step 3: Fetch Relevant Data (Parallel - if no instant response)**
+            *   `Promise.all` executes these concurrently:
+                *   `saveMessagePromise`: Ensures the user's message is saved.
+                *   `this.getChatHistory(chatId, userId)`: Retrieves recent chat messages from `Prisma`.
+                *   `memoryIndexService.searchMemories(userId, message, limit, entities)`: Performs a hybrid search (vector + full-text) for relevant memories. The `limit` (15 for complex, 7 for simple) and `entities` are influenced by `queryAnalysis`.
+        *   **Step 4: Get Memory Details**
+            *   `prisma.memory.findMany`: Fetches full details of the `relevantMemories` found in the previous step.
+        *   **Step 5: Perform Advanced Reasoning (Conditional)**
+            *   **If `queryAnalysis.isComplex`:**
+                *   `Promise.all` executes these concurrently:
+                    *   `reasoningService.detectImplications(userId, memoryDetails, message)`: Analyzes memories for action suggestions, connections, gaps, and contradictions.
+                    *   `reasoningService.graphReasoning(userId, message)`: If `queryAnalysis.needsGraph` is true, it queries the knowledge graph for insights.
+            *   **Else (simple query):** Advanced reasoning is skipped, and `implications` and `graphInsights` remain empty.
+        *   **Step 6: Build Context for LLM**
+            *   `contextString`: Formats the `memoryDetails` into a string.
+            *   `reasoningContext`: Incorporates `implications` and `graphInsights` into a structured string.
+            *   `systemPrompt`: Constructs a detailed system prompt for the LLM, including `queryAnalysis` results, `reasoningContext`, and formatting instructions (MDX, DateHighlight, MemoryHighlight, Source citations).
+            *   `userPrompt`: Combines `relevantMemories`, `chatHistory`, and the user's `message`.
+            *   `prompt`: Final combined prompt for the LLM.
+        *   **Step 7: Stream Response from LLM**
+            *   `llmService.generateCompletionStream(systemPrompt, userPrompt)`: Initiates a streaming call to the LLM (e.g., Groq API).
+            *   `TransformStream`: Processes chunks from the LLM stream:
+                *   Decodes and parses JSON chunks from the LLM.
+                *   Accumulates the `fullResponseText`.
+                *   Enqueues chunks to the client response.
+                *   **On `flush` (stream completion):**
+                    *   Saves the `fullResponseText` (assistant's response) to `prisma.chatMessage`.
+                    *   Adds a `memory-extraction` job to `memoryQueue` for background processing.
+
+## 3. Component Breakdown
+
+### API Layer
+*   **`src/api/routes/chat.routes.ts`**: Defines the API endpoints related to chat, mapping HTTP methods and paths to controller functions and applying middleware.
+*   **`src/controllers/chat.controller.ts`**: Handles incoming HTTP requests, extracts parameters, and delegates business logic to the `ChatService`. Responsible for orchestrating the response stream.
+*   **`src/middleware/auth.middleware.ts`**: `isAuthenticated` middleware verifies user authentication via JWT, ensuring only authorized users can access protected routes.
+
+### Service Layer (Core Business Logic)
+*   **`src/services/chat.service.ts`**: The central orchestrator for chat interactions. It coordinates various sub-services to generate a comprehensive response.
+*   **`src/services/query-analyzer.service.ts`**: Analyzes incoming user queries using regex patterns to determine intent, complexity, and extract entities. This guides the subsequent processing steps.
+*   **`src/services/instant-response.service.ts`**: Attempts to provide immediate answers for simple, factual, or previously cached queries, bypassing the full LLM pipeline for efficiency. It uses pattern matching, exact caching, semantic caching, and direct memory lookups.
+*   **`src/services/memory-index.service.ts`**: Manages the search and retrieval of relevant user memories. It employs a hybrid search approach (vector similarity + full-text search) and a composite scoring algorithm (recency, access frequency, importance, confidence, contextual boost).
+*   **`src/services/reasoning.service.ts`**: Performs advanced cognitive tasks for complex queries:
+    *   `detectImplications`: Identifies action suggestions, connections, gaps, and contradictions from a set of memories.
+    *   `graphReasoning`: Queries the knowledge graph (`graphService`) to find relationships and insights between entities.
+*   **`src/services/llm.service.ts`**: Abstracts interactions with Large Language Models (LLMs). Provides methods for:
+    *   `createEmbedding`: Generates vector embeddings (e.g., using Ollama).
+    *   `generateCompletion`: Generates non-streaming text completions (e.g., using Ollama).
+    *   `generateCompletionStream`: Generates streaming text completions (e.g., using Groq API for real-time chat).
+*   **`src/services/graph.service.ts`**: Manages the knowledge graph. Provides functionalities to:
+    *   Retrieve entities and their relationships.
+    *   Find paths between entities (shortest path, all paths).
+    *   Analyze graph properties (centrality, clusters).
+    *   Calculate relationship strength.
+*   **`src/services/memory.service.ts`**: Handles the basic CRUD operations and ingestion of memories into the database.
+*   **`src/services/memory-extractor.service.ts`**: Processes conversation turns (user message + assistant response) to extract new, distinct memories using an LLM. It also detects and resolves contradictions with existing memories.
+*   **`src/services/contradiction-detection.service.ts`**: Identifies conflicting information between new and existing memories and provides mechanisms for resolution (e.g., marking as temporal update, noting contradiction).
+*   **`src/services/smart-cache.service.ts`**: Caches complex insights (graph data, timelines, implications) related to specific entities to improve performance for subsequent queries involving those entities. It also handles cache invalidation.
+
+### Data Layer
+*   **`src/db/index.ts`**: Initializes and exports the `PrismaClient` instance, providing an ORM for database interactions.
+*   **`prisma/schema.prisma`**: Defines the database schema (models like `User`, `Chat`, `ChatMessage`, `Memory`, `Entity`, `EntityLink`, `Embedding`).
+*   **PostgreSQL Database**: The primary persistent data store for all application data, including chat history, memories, entities, and the knowledge graph.
+*   **Redis**: Used for caching (instant response cache, smart cache) and as the backend for BullMQ queues.
+
+### Asynchronous Processing
+*   **`src/queues/redis.ts`**: Configures and exports the Redis client used by BullMQ.
+*   **`src/queues/memory.queue.ts`**:
+    *   `memoryQueue`: A BullMQ queue (`memory-extraction`) where jobs are added (e.g., after a chat response is streamed).
+    *   `memoryWorker`: A BullMQ worker that processes jobs from the `memory-extraction` queue. It calls `memoryExtractorService.extractAndStore` to perform the actual memory processing in the background, preventing it from blocking the main chat response thread.
+
+### LLM Interactions
+*   **Embeddings**: Generated by `llmService.createEmbedding` (using Ollama) for vector search in `memoryIndexService` and semantic caching in `instantResponseService`.
+*   **Completions**: Generated by `llmService.generateCompletionStream` (using Groq) for real-time chat responses, and `llmService.generateCompletion` (using Ollama) for internal tasks like memory extraction and reasoning.
+
+### Caching
+*   **Instant Response Cache**: Managed by `instantResponseService` in Redis, storing exact and semantically similar query-response pairs.
+*   **Smart Cache**: Managed by `smartCacheService` in Redis, storing pre-computed graph, timeline, and implication insights for entities.
+
+### Reasoning
+*   **Query Analysis**: `queryAnalyzerService` classifies queries.
+*   **Implication Detection**: `reasoningService.detectImplications` identifies deeper insights from memories.
+*   **Graph Reasoning**: `reasoningService.graphReasoning` leverages the knowledge graph for complex relationship understanding.
+
+This comprehensive flow ensures that the system can handle a wide range of user queries efficiently, from simple factual questions to complex reasoning tasks, while continuously learning and updating its knowledge base in the background.

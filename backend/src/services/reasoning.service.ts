@@ -923,7 +923,7 @@ Narrative:`;
 
         // Check if this relationship indicates expertise or ability to help
         if (relType.match(/expert|specialist|lead|manager|knows_about/i) || 
-            (topic && relatedEntity?.name.toLowerCase().includes(topic.toLowerCase()))) {
+            (topic && relatedEntity?.name.toLowerCase().includes(topic.toLowerCase()))) { 
           
           const strength = await graphService.getRelationshipStrength(
             userId,

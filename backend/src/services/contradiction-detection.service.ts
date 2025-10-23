@@ -45,9 +45,38 @@ export class ContradictionDetectionService {
     }
 
     // Use LLM to detect contradictions
-    const prompt = `Analyze if the following NEW memory contradicts any EXISTING memories.\n\nNEW MEMORY:\n${newMemoryContent}\n\nEXISTING MEMORIES:\n${recentMemories.map((m, i) => `[${i}] ${m.content}`).join('\n')}\n\nTask: Identify if the NEW memory contradicts any EXISTING memories. A contradiction means they make conflicting claims about the same subject.\n\nExamples of contradictions:\n- "I prefer coffee" vs "I prefer tea" (about same preference)\n- "Sarah is an intern" vs "Sarah is a senior engineer" (about same person's role, though could be temporal progression)\n- "Meeting is on Monday" vs "Meeting is on Tuesday" (about same event)\n\nExamples of NOT contradictions:\n- "I had coffee today" vs "I prefer tea" (one is specific instance, other is general preference)\n- Different facts about different subjects\n- Complementary information\n\nRespond in JSON format:\n{\n  "contradictions": [\n    {\n      "existingMemoryIndex": <number>,\n      "reason": "<brief explanation>",\n      "severity": "<high|medium|low>",\n      "isTemporalProgression": <boolean>\n    }\n  ]\n}\n\nIf no contradictions, return: {\"contradictions\": []}`;
+    const systemPrompt = `Analyze if the following NEW memory contradicts any EXISTING memories.
+
+Task: Identify if the NEW memory contradicts any EXISTING memories. A contradiction means they make conflicting claims about the same subject.
+
+Examples of contradictions:
+- "I prefer coffee" vs "I prefer tea" (about same preference)
+- "Sarah is an intern" vs "Sarah is a senior engineer" (about same person's role, though could be temporal progression)
+- "Meeting is on Monday" vs "Meeting is on Tuesday" (about same event)
+
+Examples of NOT contradictions:
+- "I had coffee today" vs "I prefer tea" (one is specific instance, other is general preference)
+- Different facts about different subjects
+- Complementary information
+
+Respond in JSON format:
+{
+  "contradictions": [
+    {
+      "existingMemoryIndex": <number>,
+      "reason": "<brief explanation>",
+      "severity": "<high|medium|low>",
+      "isTemporalProgression": <boolean>
+    }
+  ]
+}
+
+If no contradictions, return: {"contradictions": []}`;
+
+    const userPrompt = `NEW MEMORY:\n${newMemoryContent}\n\nEXISTING MEMORIES:\n${recentMemories.map((m, i) => `[${i}] ${m.content}`).join('\n')}`;
 
     try {
+      const prompt = `${systemPrompt}\n\n${userPrompt}`;
       console.time('llmService.generateCompletion (contradiction detection)');
       const response = await llmService.generateCompletion(prompt);
       console.timeEnd('llmService.generateCompletion (contradiction detection)');
@@ -157,6 +186,6 @@ export class ContradictionDetectionService {
 
   private extractJSON(text: string): string {
     const jsonMatch = text.match(/\{[\s\S]*\}/);
-    return jsonMatch ? jsonMatch[0] : '{"contradictions": []}';
+    return jsonMatch ? jsonMatch[0] : '{\"contradictions\": []}';
   }
 }

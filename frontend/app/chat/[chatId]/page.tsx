@@ -214,6 +214,8 @@ export default function ChatPage() {
             'Authorization': token ? `Bearer ${token}` : '',
           },
         });
+        console.log(response);
+        
         setMessages(response.data);
         console.log('Fetched chat history:', response.data);
       } catch (error) {

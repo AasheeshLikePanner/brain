@@ -51,12 +51,7 @@ export const generateDailySummaries = async () => {
 
       console.log(`[SummarizationJob] Generating summary for user ${userId} from ${memoriesToSummarize.length} memories.`);
 
-      const prompt = `Please summarize the following collection of memories into a concise, coherent daily summary. Focus on key events, decisions, and insights. The summary should be in the first person, as if the user is recalling their day.
-
-Memories:
-${combinedContent}
-
-Daily Summary:`;
+      const prompt = `Please summarize the following collection of memories into a concise, coherent daily summary. Focus on key events, decisions, and insights. The summary should be in the first person, as if the user is recalling their day.\n\nMemories:\n${combinedContent}\n\nDaily Summary:`;
 
       const summaryContent = await llmService.generateCompletion(prompt);
 
@@ -67,7 +62,7 @@ Daily Summary:`;
             content: summaryContent,
             sourceMemoryIds: sourceMemoryIds,
             level: 1, // Daily summary
-            modelName: 'qwen2.5:1.5', // Or whatever model is used for summarization
+            modelName: 'qwen:latest', // Or whatever model is used for summarization
           },
         });
         console.log(`[SummarizationJob] Successfully created daily summary for user ${userId}.`);
