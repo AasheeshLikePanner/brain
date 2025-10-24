@@ -37,7 +37,7 @@ export default function ChatPage() {
   const [seconds, setSeconds] = useState(0);
   const [isLoading, setIsLoading] = useState(false);
 
-  const messagesEndRef = useRef<HTMLDivElement>(null);
+  const chatContainerRef = useRef<HTMLDivElement>(null);
 
   // NEW: State to store the user's location
   const [location, setLocation] = useState<Location | null>(null);
@@ -120,12 +120,17 @@ export default function ChatPage() {
     };
   }, [isRecording]);
 
-  // NEW: useEffect to scroll to the bottom when messages change
   useEffect(() => {
-    if (messagesEndRef.current) {
-      messagesEndRef.current.scrollIntoView({ behavior: 'smooth' });
-    }
-  }, [messages]);
+    const timer = setTimeout(() => {
+      if (chatContainerRef.current) {
+        chatContainerRef.current.scrollTo({
+          top: chatContainerRef.current.scrollHeight,
+          behavior: "smooth",
+        });
+      }
+    }, 100); // Small delay to ensure content has rendered
+    return () => clearTimeout(timer);
+  }, [messages, isLoading]);
 
   const handleSendMessage = async (messageContent: string) => {
     if (!messageContent.trim()) return;
@@ -251,7 +256,7 @@ export default function ChatPage() {
 
       {/* Main content area for messages */}
 
-      <div ref={messagesEndRef} className="flex-1 overflow-y-auto relative flex flex-col items-center py-2 pb-[120px]">
+      <div ref={chatContainerRef} className="flex-1 overflow-y-auto relative flex flex-col items-center py-2 pb-[120px]">
 
         <div className="w-1/2 flex flex-col space-y-4">
 

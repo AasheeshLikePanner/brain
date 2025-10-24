@@ -90,7 +90,7 @@ class ChatService {
     // Step 3: Fetch relevant data in parallel (if not handled by instant response)
     const [_, history, relevantMemories] = await Promise.all([
       saveMessagePromise,
-      this.getChatHistory(chatId, userId),
+      this.getChatHistory(chatId, userId, 5),
       memoryIndexService.searchMemories(
         userId,
         message,
@@ -339,6 +339,7 @@ class ChatService {
       where: { chatId, chat: { userId } },
       select: { role: true, content: true },
       orderBy: { createdAt: 'desc' },
+      take:limit
     });
     console.timeEnd('chatService.getChatHistory');
     return history.reverse(); // Chronological order
